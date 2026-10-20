@@ -98,6 +98,8 @@ export type Harness = {
     signal?: AbortSignal;
   }): Promise<boolean>;
   interrupt(input: HarnessSession): Promise<boolean>;
+  /** Native HTTP/marker completion proof, supported by the Kilo v1 harness. */
+  drainSession?: WrapperKiloClient['drainSession'];
   observe(input: HarnessObservationInput): Promise<SessionObservation[]>;
   release(input: HarnessSession & { deadlineMs: number; signal: AbortSignal }): Promise<{
     ok: boolean;

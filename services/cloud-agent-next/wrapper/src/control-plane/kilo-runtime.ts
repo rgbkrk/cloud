@@ -303,6 +303,7 @@ export type KiloRuntimeOptions = {
   onEvent?: (event: KiloFeedEvent) => void;
   onHarnessActivity?: (event: HarnessActivityEvent) => void;
   onActivityChange?: () => void;
+  onFeedInterrupted?: (nativeRuntimeId: string) => void;
   onDeadline?: (
     identity: ExecutionIdentity,
     reason: ExecutionFailure,
@@ -351,6 +352,7 @@ export type KiloFeedCallbacks = {
 };
 
 export type KiloRuntime = {
+  readonly nativeRuntimeId: string;
   readonly directory: string;
   readonly env: Record<string, string>;
   readonly client: Harness;
@@ -371,6 +373,7 @@ export type KiloRuntime = {
   isRestarting(): boolean;
   isUnavailable(): boolean;
   needsCompute(): boolean;
+  liveTreeExecutions(root: string): number[] | undefined;
   sessionState(id: string): ReturnType<RuntimeActivity['state']>;
   refreshActivity(): Promise<void>;
   shutdown(): Promise<void>;
@@ -483,6 +486,16 @@ function createHealthProbe(
       clearTimeout(timer);
     }
   };
+}
+
+function exitsWithin(kilo: KiloProcess, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    kilo.exited.then(() => true),
+    new Promise<boolean>(resolve => {
+      timer = setTimeout(() => resolve(false), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }
 
 /** PTY half of credential maintenance; native idle comes from the supervisor. */
@@ -724,6 +737,11 @@ export function createKiloRuntime(options: KiloRuntimeOptions): KiloRuntime {
               attempt !== feedAttempt
             )
               return;
+            if (feed === next) {
+              feed = undefined;
+              options.onFeedInterrupted?.(processId);
+              next.close();
+            }
             currentActivity?.lost();
             // A stream end completes the current attempt; with none in flight it
             // starts a new recovery episode. It never restarts Kilo directly.
@@ -738,10 +756,18 @@ export function createKiloRuntime(options: KiloRuntimeOptions): KiloRuntime {
   }
 
   async function runRecovery(): Promise<void> {
+    let refusedSince: number | undefined;
     while (phase === 'running' || phase === 'suspected') {
       const now = scheduler.now();
       pruneReconnects(now);
       if (reconnects.length >= timers.sseReconnectLimit) {
+        // Refused reopens spend the budget within milliseconds of a crash, before the
+        // process exit arrives. That exit then restarts Kilo for its real reason.
+        const refused = kiloProcess;
+        if (refused && refusedSince !== undefined && now - refusedSince < timers.healthRequestMs) {
+          if (await exitsWithin(refused, timers.healthRequestMs)) return;
+          if (refused !== kiloProcess) return;
+        }
         // Spec §7: too many reconnects inside the window without a recovered
         // stream; restart Kilo.
         await restartHung('sse_reconnect_budget');
@@ -753,8 +779,10 @@ export function createKiloRuntime(options: KiloRuntimeOptions): KiloRuntime {
       if (!current) return;
       const previous = feed;
       feed = undefined;
+      if (previous) options.onFeedInterrupted?.(nativeRuntimeId);
       previous?.close();
       if (await openAttempt(current)) return;
+      refusedSince ??= now;
     }
   }
 
@@ -1272,7 +1300,11 @@ export function createKiloRuntime(options: KiloRuntimeOptions): KiloRuntime {
       }
     },
     applyPendingCredentials,
+    get nativeRuntimeId() {
+      return nativeRuntimeId;
+    },
     needsCompute: () => activity?.needsCompute() ?? false,
+    liveTreeExecutions: root => activity?.liveTreeExecutions(root),
     sessionState: id => activity?.state(id),
     refreshActivity: () => activity?.refresh() ?? Promise.resolve(),
     phase: currentPhase,
@@ -1300,6 +1332,7 @@ export type KiloRuntimesOptions = Omit<
   | 'onUnavailable'
   | 'onDeadline'
   | 'onActivityChange'
+  | 'onFeedInterrupted'
   | 'onMemoryHold'
 > & {
   pidfileDirectory?: string;
@@ -1315,6 +1348,7 @@ export type KiloRuntimesOptions = Omit<
     stopped: Promise<boolean>
   ) => void;
   onActivityChange?: (key: string) => void;
+  onFeedInterrupted?: (nativeRuntimeId: string, key: string) => void;
   onMemoryHold?: (info: { directory: string; held: boolean; key: string }) => void;
 };
 
@@ -1492,6 +1526,7 @@ export function createKiloRuntimes(options: KiloRuntimesOptions): KiloRuntimes {
         onDeadline: (identity, reason, retry, stopped) =>
           options.onDeadline?.(identity, reason, retry, input.key, stopped),
         onActivityChange: () => options.onActivityChange?.(input.key),
+        onFeedInterrupted: id => options.onFeedInterrupted?.(id, input.key),
         onUnavailable: directory => options.onUnavailable?.(directory, input.key),
         onMemoryHold: info => options.onMemoryHold?.({ ...info, key: input.key }),
       });

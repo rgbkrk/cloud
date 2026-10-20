@@ -40,7 +40,6 @@ export function createReviewPublication(input: {
       if (type === 'session.turn.open' && state === 'submitted') state = 'running';
       if (type === 'session.turn.close' && state === 'running') {
         state = 'spent';
-        clearTimer();
       }
     },
     observeActivity(activity: HarnessActivity) {
@@ -106,6 +105,7 @@ export function createReviewPublication(input: {
       return true;
     },
     dispose() {
+      state = 'abandoned';
       clearTimer();
       abort.abort();
     },

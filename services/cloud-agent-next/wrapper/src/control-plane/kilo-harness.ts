@@ -148,6 +148,7 @@ export function createKiloHarness(options: KiloHarnessOptions): Harness {
       return client.answerQuestion(reply.questionId, reply.answers, directory, signal);
     },
     interrupt: input => client.abortSession(input),
+    drainSession: input => client.drainSession(input),
     observe: input =>
       (options.readSnapshot ?? readSessionSnapshot)({
         ...input,
