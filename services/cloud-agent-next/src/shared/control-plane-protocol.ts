@@ -11,6 +11,7 @@ import type {
   WorkspaceFailureSubtype,
 } from '@kilocode/worker-utils/cloud-agent-failure';
 import { z } from 'zod';
+import { customerBillingFailureSchema } from './cloud-agent-billing.js';
 import type { CloudAgentRunContainer } from '@kilocode/worker-utils/cloud-agent-queue-report';
 import { RUNTIME_HARNESSES } from './control-plane-runtime-contract.js';
 import { gitAuthorSchema, sessionAttachMcpServersSchema } from './sandbox-control-protocol.js';
@@ -26,6 +27,14 @@ import { PreviewServicesScanSchema } from './preview-services.js';
 const cloudAgentWorktreeIdSchema = z.templateLiteral(['worktree_', z.uuid()]);
 
 export const CONTROL_PLANE_PROTOCOL_VERSION = 3;
+
+export const nativeBillingStopRequestSchema = z
+  .object({
+    allocationRef: z.string().min(1),
+    billingFailure: customerBillingFailureSchema,
+  })
+  .strict();
+export type NativeBillingStopRequest = z.infer<typeof nativeBillingStopRequestSchema>;
 
 /**
  * Launch-environment key that carries the allocation id. The wrapper echoes it
@@ -845,6 +854,7 @@ const controlPlaneRouteFailedSchema = z
     state: z.literal('failed'),
     attemptId: z.string().min(1).max(128),
     reason: controlPlaneFailureReasonSchema,
+    billingFailure: customerBillingFailureSchema.optional().catch(undefined),
     subtype: controlPlaneWorkspaceFailureSubtypeSchema.optional().catch(undefined),
     container: controlPlaneRunContainerSchema.optional(),
   })
@@ -854,6 +864,7 @@ const controlPlaneRouteLostSchema = z
     state: z.literal('lost'),
     attemptId: z.string().min(1).max(128),
     reason: controlPlaneFailureReasonSchema,
+    billingFailure: customerBillingFailureSchema.optional().catch(undefined),
     container: controlPlaneRunContainerSchema.optional(),
   })
   .strict();
