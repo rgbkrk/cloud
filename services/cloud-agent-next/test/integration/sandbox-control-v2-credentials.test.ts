@@ -53,6 +53,7 @@ import {
 import {
   createFakeCredentialBroker,
   fakeOutboundContainerId,
+  fakeRuntimeProxyOrigin,
   installFakeCredentialEnv,
   type FakeCredentialBroker,
 } from './helpers/fake-credentials.js';
@@ -1274,6 +1275,7 @@ describe('SandboxControlV2 credentials (B3)', () => {
       sessionId: SESSION,
       kiloSessionId: kiloSessionIdFor(SESSION),
       directory: routeSpec(SESSION).directory,
+      originProof: await fakeRuntimeProxyOrigin(SANDBOX_ID, 'vercel'),
     });
     if (fence === null) throw new Error('missing proxy fence');
     const peer = createRuntimeProxyMintingPeer(env, sessionId => ({
@@ -1392,12 +1394,14 @@ describe('SandboxControlV2 credentials (B3)', () => {
     expect(before.members).toHaveLength(2);
     expect(before.kilo.runtimeProxy.members).toHaveLength(2);
     await stub.release({ sessionId: SESSION });
+    const originProof = await fakeRuntimeProxyOrigin(SANDBOX_ID, 'vercel');
     const fence = (sessionId: string) =>
       stub.getRuntimeCredentialProxyFence({
         ownerId: 'user_123',
         sessionId,
         kiloSessionId: kiloSessionIdFor(sessionId),
         directory: '/workspace/shared_modern',
+        originProof,
       });
     expect(await fence(SESSION)).toBeNull();
     expect(await fence(SESSION_NEXT)).not.toBeNull();

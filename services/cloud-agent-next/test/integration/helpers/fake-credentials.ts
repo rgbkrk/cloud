@@ -1,3 +1,6 @@
+import { env } from 'cloudflare:test';
+import { runtimeProxyOriginProof } from '../../../src/runtime-credential-proxy-origin.js';
+
 /** Decoded-only fixture; authorization verification is covered by the runtime-proxy suite. */
 export const FAKE_RUNTIME_AUTHORIZED_KILO_TOKEN =
   'eyJhbGciOiJub25lIn0.eyJydW50aW1lQXV0aG9yaXphdGlvbiI6eyJpZCI6InJhXzEifX0.c2ln';
@@ -61,6 +64,20 @@ export const FAKE_SANDBOX_CONTAINMENT_NAMESPACE = FAKE_SANDBOX_CONTAINERS_NAMESP
 
 export function fakeOutboundContainerId(logicalSandboxId: string): string {
   return FAKE_SANDBOX_CONTAINERS_NAMESPACE.idFromName(logicalSandboxId).toString();
+}
+
+/**
+ * The runtime proxy origin proof the platform egress adds for one sandbox. Its
+ * egress id is the Containers outbound id, or the logical sandbox id on Vercel.
+ */
+export async function fakeRuntimeProxyOrigin(
+  sandboxId: string,
+  provider: 'vercel' | 'cloudflare-containers'
+): Promise<string> {
+  const outboundId = provider === 'vercel' ? sandboxId : fakeOutboundContainerId(sandboxId);
+  const proof = await runtimeProxyOriginProof(env, outboundId);
+  if (proof === null) throw new Error('NEXTAUTH_SECRET is not configured');
+  return proof;
 }
 
 export function installFakeCredentialEnv(
