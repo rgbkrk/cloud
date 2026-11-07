@@ -8885,6 +8885,49 @@ export type CloudAgentSandboxAllocationSetting =
 export type NewCloudAgentSandboxAllocationSetting =
   typeof cloud_agent_sandbox_allocation_settings.$inferInsert;
 
+export const cloud_agent_repository_environment_defaults = pgTable(
+  'cloud_agent_repository_environment_defaults',
+  {
+    id: uuid()
+      .default(sql`pg_catalog.gen_random_uuid()`)
+      .primaryKey()
+      .notNull(),
+    owned_by_organization_id: uuid().references(() => organizations.id, { onDelete: 'cascade' }),
+    owned_by_user_id: text().references(() => kilocode_users.id, { onDelete: 'cascade' }),
+    repository_full_name: text().notNull(),
+    repository_platform: text({ enum: ['github', 'gitlab'] }).notNull(),
+    // Retain deleted environment IDs so launches fail explicitly instead of silently losing setup.
+    environment_id: uuid().notNull(),
+    created_at: timestamp({ withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updated_at: timestamp({ withTimezone: true, mode: 'string' })
+      .defaultNow()
+      .notNull()
+      .$onUpdateFn(() => sql`now()`),
+  },
+  table => [
+    uniqueIndex('UQ_cloud_agent_repo_env_defaults_user')
+      .on(table.owned_by_user_id, table.repository_full_name, table.repository_platform)
+      .where(isNotNull(table.owned_by_user_id)),
+    uniqueIndex('UQ_cloud_agent_repo_env_defaults_org')
+      .on(table.owned_by_organization_id, table.repository_full_name, table.repository_platform)
+      .where(isNotNull(table.owned_by_organization_id)),
+    index('IDX_cloud_agent_repo_env_defaults_org').on(table.owned_by_organization_id),
+    index('IDX_cloud_agent_repo_env_defaults_user').on(table.owned_by_user_id),
+    check(
+      'cloud_agent_repo_env_defaults_owner_check',
+      sql`(
+        (${table.owned_by_user_id} IS NOT NULL AND ${table.owned_by_organization_id} IS NULL) OR
+        (${table.owned_by_user_id} IS NULL AND ${table.owned_by_organization_id} IS NOT NULL)
+      )`
+    ),
+  ]
+);
+
+export type CloudAgentRepositoryEnvironmentDefault =
+  typeof cloud_agent_repository_environment_defaults.$inferSelect;
+export type NewCloudAgentRepositoryEnvironmentDefault =
+  typeof cloud_agent_repository_environment_defaults.$inferInsert;
+
 // ============ CLOUD AGENT BUILT-IN AGENT SETTINGS ============
 // User-scoped model and visibility overrides for the CLI's built-in agents
 // (for example `explore`, `compaction`, `plan`, and `debug`). These apply to

@@ -208,6 +208,12 @@ export {
   type RepositorySettingsInput,
 } from './repository-settings-service';
 
+export {
+  getRepositoryEnvironmentDefaults,
+  getRepositoryEnvironmentDefault,
+  type RepositoryEnvironmentDefaultRow,
+} from './repository-environment-defaults-db';
+
 // Sandbox allocation settings (context default + per-repository overrides)
 export {
   getSandboxAllocationSettings,

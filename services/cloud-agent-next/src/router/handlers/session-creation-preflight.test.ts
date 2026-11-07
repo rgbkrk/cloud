@@ -855,6 +855,91 @@ describe('session creation preflight', () => {
       });
     });
 
+    it('fails with a specific error when the saved default environment no longer exists', async () => {
+      loadEnvironmentForSessionMock.mockResolvedValueOnce({
+        status: 'default-not-found',
+        environmentId,
+      });
+
+      await expect(
+        preflightSessionCreation(
+          request({ repository: githubRepository, options: webOptions }),
+          context,
+          'prepareSession'
+        )
+      ).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+        message: `The repository's default environment (${environmentId}) was not found. Update the repository settings or select an environment.`,
+      });
+    });
+
+    it('fails with a specific error when the saved default environment lacks the repository', async () => {
+      loadEnvironmentForSessionMock.mockResolvedValueOnce({
+        status: 'default-without-repository',
+        environmentId,
+      });
+
+      await expect(
+        preflightSessionCreation(
+          request({ repository: githubRepository, options: webOptions }),
+          context,
+          'prepareSession'
+        )
+      ).rejects.toMatchObject({
+        code: 'BAD_REQUEST',
+        message: `The repository's default environment (${environmentId}) does not contain this repository. Update the repository settings or select an environment.`,
+      });
+    });
+
+    it.each(['scheduled', 'webhook', 'slack', 'github', 'linear', 'discord'])(
+      'applies the repository default environment on the automatic origin %s',
+      async origin => {
+        loadEnvironmentForSessionMock.mockResolvedValueOnce({
+          status: 'match',
+          environment: environmentLoad({ envVars: { DEFAULT: '1' } }, environmentId),
+        });
+
+        const resolved = await preflightSessionCreation(
+          request({
+            repository: githubRepository,
+            options: { createdOnPlatform: origin },
+          }),
+          context,
+          'prepareSession'
+        );
+
+        expect(loadEnvironmentForSessionMock).toHaveBeenCalledOnce();
+        expect(resolved.environment?.environmentId).toBe(environmentId);
+        expect(mergeProfileConfigurationMock).toHaveBeenCalledWith(
+          db,
+          expect.objectContaining({ environment: { envVars: { DEFAULT: '1' } } })
+        );
+      }
+    );
+
+    it('lets an explicit selection bypass a saved default', async () => {
+      loadEnvironmentForSessionMock.mockResolvedValueOnce({
+        status: 'match',
+        environment: environmentLoad({}, environmentId),
+      });
+
+      const resolved = await preflightSessionCreation(
+        request({
+          repository: githubRepository,
+          options: webOptions,
+          requestedEnvironment: { id: environmentId },
+        }),
+        context,
+        'prepareSession'
+      );
+
+      expect(loadEnvironmentForSessionMock).toHaveBeenCalledWith(
+        db,
+        expect.objectContaining({ environmentId })
+      );
+      expect(resolved.environment?.environmentId).toBe(environmentId);
+    });
+
     describe('additional repositories of the selected environment', () => {
       const repositoryOf = (repoFullName: string) => ({
         identity: { platform: 'github' as const, repoFullName },

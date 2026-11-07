@@ -5,6 +5,7 @@ import {
   type CloudAgentEnvironment,
 } from '@kilocode/db/schema';
 import { and, asc, eq, isNull, sql, type SQL } from 'drizzle-orm';
+import { repoFullNameFromGitUrl } from '@kilocode/worker-utils/git-url';
 import {
   normalizeBitbucketUuid,
   normalizeGitlabCloneUrl,
@@ -13,6 +14,9 @@ import {
   type EnvironmentPlatform,
   type EnvironmentRepositoryIdentity,
 } from './environment-contracts';
+import { getRepositoryEnvironmentDefault } from './repository-environment-defaults-db';
+import { canonicalRepoFullName } from './repo-binding-db';
+import type { RepositoryPlatform } from './types';
 
 /**
  * Finding environments. A V1 environment holds one repository in its identity
@@ -106,6 +110,53 @@ export function environmentContainsRepository(repository: EnvironmentRepositoryI
 }
 
 /**
+ * Whether an environment contains the repository a settings row names. A
+ * repository settings key is the canonical full name for both supported
+ * platforms, so this matches the V1 identity column or a V2 entry by that key.
+ */
+export function environmentContainsRepositoryFullName(
+  repositoryFullName: string,
+  platform: RepositoryPlatform
+): SQL {
+  const normalized = canonicalRepoFullName(repositoryFullName);
+  const probe = { platform, repoFullName: normalized };
+  const v1Identity = and(
+    eq(cloud_agent_environments.platform, platform),
+    eq(cloud_agent_environments.repo_full_name, normalized)
+  );
+  const v2Containment = sql`${cloud_agent_environments.repositories} @> ${JSON.stringify([probe])}::jsonb`;
+  return sql`(${v1Identity} OR ${v2Containment})`;
+}
+
+/**
+ * The settings key of a launch repository, or undefined for a platform with no
+ * repository settings. GitLab is keyed by its canonical full name derived from
+ * the clone URL, matching how repository settings store it.
+ */
+function repositoryDefaultKey(
+  repository: EnvironmentRepositoryIdentity
+): { repositoryFullName: string; repositoryPlatform: RepositoryPlatform } | undefined {
+  switch (repository.platform) {
+    case 'github':
+      return {
+        repositoryFullName: canonicalRepoFullName(repository.repoFullName),
+        repositoryPlatform: 'github',
+      };
+    case 'gitlab': {
+      const repoFullName = repoFullNameFromGitUrl(repository.cloneUrl, repository.cloneUrl);
+      return repoFullName === undefined
+        ? undefined
+        : {
+            repositoryFullName: canonicalRepoFullName(repoFullName),
+            repositoryPlatform: 'gitlab',
+          };
+    }
+    case 'bitbucket':
+      return undefined;
+  }
+}
+
+/**
  * The environments that match a condition, ordered by name and id, whose owning
  * organization is active. A personal environment has no organization row, so the
  * left join keeps it.
@@ -147,15 +198,22 @@ export type EnvironmentSelection =
   /** The requested environment does not exist for this owner. */
   | { status: 'requested-not-found' }
   /** The requested environment exists for this owner but lacks the repository. */
-  | { status: 'requested-without-repository' };
+  | { status: 'requested-without-repository' }
+  /** The repository's saved default no longer exists for this owner. */
+  | { status: 'default-not-found'; environmentId: string }
+  /** The repository's saved default exists but lacks the repository. */
+  | { status: 'default-without-repository'; environmentId: string };
 
 /**
  * Choose the environment of a session's launch repository.
  *
  * With `environmentId`, only that environment is considered: it must belong to
- * the owner and contain the repository. Without one, the owner's environments
- * that contain the repository are listed: none gives `none`, one gives `match`,
- * and several give `conflict`. It never picks an arbitrary one of several.
+ * the owner and contain the repository. Without one, the repository's saved
+ * default is considered first. It must still exist for the owner and contain
+ * the repository; a stale saved id fails rather than silently falling through.
+ * Only then are the owner's environments that contain the repository listed:
+ * none gives `none`, one gives `match`, and several give `conflict`. It never
+ * picks an arbitrary one of several.
  */
 export async function selectEnvironmentForSession(
   db: Pick<WorkerDb, 'select'>,
@@ -165,11 +223,10 @@ export async function selectEnvironmentForSession(
     environmentId?: string;
   }
 ): Promise<EnvironmentSelection> {
+  const ownership = buildEnvironmentOwnershipCondition(input.owner);
+
   if (input.environmentId !== undefined) {
-    const owned = and(
-      eq(cloud_agent_environments.id, input.environmentId),
-      buildEnvironmentOwnershipCondition(input.owner)
-    );
+    const owned = and(eq(cloud_agent_environments.id, input.environmentId), ownership);
     const [environment] = await selectActiveEnvironments(db, owned);
     if (!environment) return { status: 'requested-not-found' };
     const [containing] = await selectActiveEnvironments(
@@ -179,6 +236,28 @@ export async function selectEnvironmentForSession(
     return containing
       ? { status: 'match', environment: containing }
       : { status: 'requested-without-repository' };
+  }
+
+  const defaultKey = repositoryDefaultKey(input.repository);
+  if (defaultKey) {
+    const defaultEnvironmentId = await getRepositoryEnvironmentDefault(
+      db,
+      input.owner,
+      defaultKey.repositoryFullName,
+      defaultKey.repositoryPlatform
+    );
+    if (defaultEnvironmentId !== null) {
+      const owned = and(eq(cloud_agent_environments.id, defaultEnvironmentId), ownership);
+      const [environment] = await selectActiveEnvironments(db, owned);
+      if (!environment) return { status: 'default-not-found', environmentId: defaultEnvironmentId };
+      const [containing] = await selectActiveEnvironments(
+        db,
+        and(owned, environmentContainsRepository(input.repository))
+      );
+      return containing
+        ? { status: 'match', environment: containing }
+        : { status: 'default-without-repository', environmentId: defaultEnvironmentId };
+    }
   }
 
   const candidates = await selectEnvironmentsContainingRepository(

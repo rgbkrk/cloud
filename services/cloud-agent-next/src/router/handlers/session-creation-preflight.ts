@@ -95,7 +95,8 @@ function environmentOwnerForSession(
  * the security agent) run without it.
  *
  * Several environments can contain the repository. A client that selected one
- * names it in `requestedEnvironment`. Without a selection, a client that marks
+ * names it in `requestedEnvironment`. Without a selection, the repository's
+ * saved default applies. With neither, a client that marks
  * `requireEnvironmentChoice` gets a conflict that names the environments, and
  * every other client runs with no environment.
  */
@@ -125,6 +126,16 @@ async function resolveEnvironment(
       throw new TRPCError({
         code: 'BAD_REQUEST',
         message: 'The selected environment does not contain this repository',
+      });
+    case 'default-not-found':
+      throw new TRPCError({
+        code: 'NOT_FOUND',
+        message: `The repository's default environment (${resolution.environmentId}) was not found. Update the repository settings or select an environment.`,
+      });
+    case 'default-without-repository':
+      throw new TRPCError({
+        code: 'BAD_REQUEST',
+        message: `The repository's default environment (${resolution.environmentId}) does not contain this repository. Update the repository settings or select an environment.`,
       });
     case 'conflict':
       if (input.requireEnvironmentChoice !== true) return null;

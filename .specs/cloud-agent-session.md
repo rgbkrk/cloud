@@ -24,7 +24,9 @@ show profile conflicts before saving; revised 2026-10-29 to allow several
 repositories in one environment; revised 2026-10-31 to define worktree-owned
 shared runtime and MCP configuration; revised 2026-11-04 to state that one
 sandbox serves one workspace; revised 2026-11-04 to add environment start
-commands and skip setup in a workspace started from an environment snapshot.
+commands and skip setup in a workspace started from an environment snapshot;
+revised 2026-11-07 to allow an independent default environment per repository,
+including non-interactive session starts.
 
 ## Conventions
 
@@ -93,8 +95,9 @@ repository.
    select it. Code
    review and security sessions MUST NOT use it. A repository without one
    launches unchanged. Its setup commands MUST run as preparation steps and
-   MUST NOT reveal secret values. When several environments contain the
-   repository, rules 14 to 16 decide.
+   MUST NOT reveal secret values. Repository settings MAY select a default
+   environment independently of profile and sandbox overrides. Environment
+   selection follows rules 14 to 16.
 7. While a repository environment applies, profile setup commands MUST NOT run.
    Profile variables, and variables and commands sent with the request, still
    apply over the environment.
@@ -127,17 +130,27 @@ repository.
     pipeline failure without requiring `set -e` in the script. A failed script
     MUST stop preparation and show the failure. Each script MAY contain up to
     16,000 characters.
-14. A repository matches every environment that contains it. When exactly one
-    matches, it MUST apply with no choice.
+14. A repository matches every environment that contains it. A valid explicit
+    environment selection MUST win over the repository's saved default. Without
+    an explicit selection, a saved default MUST apply and MUST belong to the
+    same personal or organization scope and contain the launch repository.
+    A missing or invalid saved default MUST fail with a specific error directing
+    the user to repository settings or an explicit selection, rather than
+    silently running without its setup. Without a saved default, exactly one
+    matching environment MUST apply with no choice. Personal owners and
+    organization owners or admins MAY set or clear the default; other members
+    MAY only read it.
 15. When several match, the new-session form in the web UI MUST require a valid
     choice and MUST NOT start the session without one. The form MUST
     remember the last choice per repository and personal/organization scope and
     restore it only while it still matches the repository. A request that
-    marks the choice as required and names no environment MUST fail with a
-    conflict that names the matching environments. A request that names an
-    environment that does not contain the repository MUST fail.
-16. When several match and the request does not mark the choice as required, the
-    session MUST start with no environment. This covers the mobile app, the
+    marks the choice as required, names no environment, and has no repository
+    default MUST fail with a conflict that names the matching environments.
+    A request that names an environment that does not contain the repository
+    MUST fail.
+16. When several match, no explicit selection or repository default applies,
+    and the request does not mark the choice as required, the session MUST start
+    with no environment. This covers the mobile app, the
     extension, fork and review-fix routes, continuing in Cloud Agent, and every
     automatic origin. On an origin that applies no environment, a request that
     names one is ignored, but a request that lists additional repositories MUST

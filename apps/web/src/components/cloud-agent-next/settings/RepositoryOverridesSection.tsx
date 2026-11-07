@@ -23,6 +23,7 @@ import {
 
 type RowValues = {
   profileId: string | null;
+  environmentId: string | null;
   allocation: SelectableSandboxAllocation | null;
 };
 
@@ -40,6 +41,7 @@ const toDraftRow = (repository: RepositoryOption): CloudAgentSettingsRepositoryR
   repositoryPlatform: repository.platform,
   profileId: null,
   profileName: null,
+  environmentId: null,
   allocation: null,
 });
 
@@ -70,7 +72,13 @@ export function RepositoryOverridesSection({
 
   const showPending = (row: CloudAgentSettingsRepositoryRow): CloudAgentSettingsRepositoryRow =>
     pending && repositoryRowKey(pending.repoFullName, pending.platform) === rowKey(row)
-      ? { ...row, profileId: pending.profileId ?? null, allocation: pending.allocation ?? null }
+      ? {
+          ...row,
+          profileId: pending.profileId ?? null,
+          environmentId:
+            pending.environmentId === undefined ? row.environmentId : pending.environmentId,
+          allocation: pending.allocation ?? null,
+        }
       : row;
 
   const saveValues = (
@@ -91,12 +99,17 @@ export function RepositoryOverridesSection({
   const changeRow = (row: CloudAgentSettingsRepositoryRow, patch: Partial<RowValues>) =>
     saveValues(
       { fullName: row.repositoryFullName, platform: row.repositoryPlatform },
-      { profileId: row.profileId, allocation: toSelectableAllocation(row.allocation), ...patch }
+      {
+        profileId: row.profileId,
+        environmentId: row.environmentId,
+        allocation: toSelectableAllocation(row.allocation),
+        ...patch,
+      }
     );
 
   const changeDraft = (current: RepositoryOption, patch: Partial<RowValues>) => {
-    const values = { profileId: null, allocation: null, ...patch };
-    if (!values.profileId && !values.allocation) return;
+    const values = { profileId: null, environmentId: null, allocation: null, ...patch };
+    if (!values.profileId && !values.environmentId && !values.allocation) return;
     saveValues(current, values, () => {
       setDraft(null);
       toast.success(`Added overrides for ${current.fullName}`);
@@ -126,9 +139,15 @@ export function RepositoryOverridesSection({
         />
       </div>
 
+      <p className="text-muted-foreground text-xs">
+        Default environments apply when no environment is selected, including schedules, webhooks,
+        and integrations.
+      </p>
+
       {repositories.length === 0 && !draft ? (
         <p className="text-muted-foreground rounded-lg border border-dashed px-4 py-6 text-center text-sm">
-          No overrides yet. Repositories use the default sandbox and profile.
+          No overrides yet. Repositories use automatic environment selection and the default sandbox
+          and profile.
         </p>
       ) : (
         <ul className="divide-y rounded-lg border">
@@ -136,6 +155,7 @@ export function RepositoryOverridesSection({
             <RepositoryRow
               key={`draft:${draft.platform}:${draft.fullName}`}
               row={showPending(toDraftRow(draft))}
+              organizationId={organizationId}
               profiles={profiles}
               choices={getEligibleAllocationChoices(capabilitiesByPlatform[draft.platform])}
               fixedSandbox={fixedSandbox}
@@ -153,6 +173,7 @@ export function RepositoryOverridesSection({
                 </Button>
               }
               onProfileChange={profileId => changeDraft(draft, { profileId })}
+              onEnvironmentChange={environmentId => changeDraft(draft, { environmentId })}
               onAllocationChange={allocation => changeDraft(draft, { allocation })}
               onManageProfiles={onManageProfiles}
             />
@@ -163,6 +184,7 @@ export function RepositoryOverridesSection({
               <RepositoryRow
                 key={rowKey(row)}
                 row={shown}
+                organizationId={organizationId}
                 profiles={profiles}
                 choices={getEligibleAllocationChoices(
                   capabilitiesByPlatform[row.repositoryPlatform]
@@ -182,6 +204,7 @@ export function RepositoryOverridesSection({
                   </Button>
                 }
                 onProfileChange={profileId => changeRow(shown, { profileId })}
+                onEnvironmentChange={environmentId => changeRow(shown, { environmentId })}
                 onAllocationChange={allocation => changeRow(shown, { allocation })}
                 onManageProfiles={onManageProfiles}
               />

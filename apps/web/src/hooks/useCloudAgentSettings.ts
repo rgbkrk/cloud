@@ -9,6 +9,7 @@ export type CloudAgentSettingsRepositoryRow = {
   repositoryPlatform: 'github' | 'gitlab';
   profileId: string | null;
   profileName: string | null;
+  environmentId: string | null;
   allocation: string | null;
   allocationUnavailableReason?: string;
   allocationRepositoryUnavailableReason?: string;
