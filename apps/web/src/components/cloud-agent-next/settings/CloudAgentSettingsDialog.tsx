@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Boxes, Cpu, FolderCog, Lock, SlidersHorizontal } from 'lucide-react';
+import { Boxes, Cpu, FolderCog, LayoutList, Lock, SlidersHorizontal } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -20,6 +20,7 @@ import { BuiltinAgentsSection } from './BuiltinAgentsSection';
 import { DefaultSandboxSection } from './DefaultSandboxSection';
 import { EnvironmentsSection } from './EnvironmentsSection';
 import { RepositoryOverridesSection } from './RepositoryOverridesSection';
+import { SidebarSettingsSection } from './SidebarSettingsSection';
 import { TranscriptPreferencesSection } from './TranscriptPreferencesSection';
 import { VercelComputeSettings } from './VercelComputeSettings';
 
@@ -27,7 +28,7 @@ type CloudAgentSettingsDialogProps = {
   organizationId?: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  initialSection?: 'general' | 'profiles' | 'environments' | 'compute';
+  initialSection?: 'general' | 'profiles' | 'environments' | 'compute' | 'sidebar';
   onProfileSelect?: (profileId: string) => void;
   openToNewProfile?: boolean;
   initialSelectedProfileId?: string | null;
@@ -84,7 +85,7 @@ function CloudAgentSettings({
             {organizationId ? 'Organization workspace' : 'Personal workspace'}
           </Badge>
         </div>
-        {organizationId && settings && !settings.canManage ? (
+        {organizationId && settings && !settings.canManage && activeSection !== 'sidebar' ? (
           <DialogDescription className="mt-1 flex items-center gap-1.5">
             <Lock className="size-3.5 shrink-0" aria-hidden />
             Organization settings are view only. Your personal preferences remain editable.
@@ -103,6 +104,7 @@ function CloudAgentSettings({
             value === 'general' ||
             value === 'profiles' ||
             value === 'environments' ||
+            value === 'sidebar' ||
             (value === 'compute' && settings?.canManage)
           )
             setSection(value);
@@ -134,6 +136,13 @@ function CloudAgentSettings({
           >
             <FolderCog className="size-4 shrink-0" aria-hidden />
             Profiles
+          </TabsTrigger>
+          <TabsTrigger
+            value="sidebar"
+            className="gap-2 pointer-coarse:min-h-11 md:w-full md:justify-start"
+          >
+            <LayoutList className="size-4 shrink-0" aria-hidden />
+            Sidebar
           </TabsTrigger>
           {settings?.canManage && (
             <TabsTrigger
@@ -217,6 +226,12 @@ function CloudAgentSettings({
             openToNewProfile={openToNewProfile}
             initialSelectedProfileId={initialSelectedProfileId}
           />
+        </TabsContent>
+        <TabsContent
+          value="sidebar"
+          className="mt-0 min-h-0 min-w-0 flex-1 overflow-y-auto px-6 py-5"
+        >
+          <SidebarSettingsSection organizationId={organizationId} />
         </TabsContent>
         <TabsContent
           value="compute"

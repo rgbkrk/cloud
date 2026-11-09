@@ -125,6 +125,7 @@ jest.mock('@tanstack/react-query', () => ({
 
 jest.mock('@/lib/trpc/utils', () => ({
   useTRPC: () => mockCreateTrpc(),
+  useRawTRPCClient: () => ({}),
 }));
 
 jest.mock('next/navigation', () => ({
@@ -132,6 +133,7 @@ jest.mock('next/navigation', () => ({
 }));
 
 jest.mock('jotai', () => ({
+  atom: () => ({}),
   useAtom: () => [null, jest.fn()],
   useSetAtom: () => jest.fn(),
 }));
