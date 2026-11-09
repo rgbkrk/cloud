@@ -51,10 +51,9 @@ export function usePreviewController({
   const { openPreview } = useOpenPreview(organizationId);
   const [dialogOpen, setDialogOpen] = useState(false);
 
-  // A stale open dialog must not open against the next preview target.
   useEffect(() => {
     setDialogOpen(false);
-  }, [actionTarget?.worktreeId, actionTarget?.cloudAgentSessionId, organizationId]);
+  }, [target?.worktreeId, target?.cloudAgentSessionId, organizationId]);
 
   const openDialog = useCallback(() => {
     if (!actionTarget) return;

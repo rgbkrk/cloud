@@ -19,6 +19,10 @@ import type { SessionCommit } from '@kilocode/cloud-agent-sdk';
 import type { useWorktreeReview } from './useWorktreeReview';
 import type { WorktreeReviewDialog } from './WorktreeReviewDialog';
 import type { WorktreeReviewComment } from './worktree-review';
+import type {
+  usePreviewController as UsePreviewController,
+  PreviewControllerInput,
+} from './use-preview-controller';
 import { worktreeFileIdentity } from '@kilocode/worker-utils/cloud-agent-worktree-changes';
 import {
   CHAT_TAB_ID,
@@ -50,7 +54,9 @@ let mockParentSession:
   | undefined;
 const mockSkipToken = Symbol('skip');
 const mockParentQuery = jest.fn();
-const mockPreviewOptions = jest.fn((_target: unknown, _organizationId?: string) => null);
+const mockPreviewOptions = jest.fn(
+  (_target: unknown, _organizationId?: string): string | null => null
+);
 const mockParentQueryOptions = jest.fn((input: unknown) => ({
   queryKey: [['worktreeParent'], input],
 }));
@@ -343,6 +349,75 @@ function installTerminalTestDom() {
   if (!container) throw new Error('Missing terminal test root');
   return { container, cleanup: () => Object.assign(globalThis, previous) };
 }
+
+describe('preview dialog lifecycle', () => {
+  let usePreviewController: typeof UsePreviewController;
+  let dom: ReturnType<typeof installTerminalTestDom>;
+  let root: Root;
+  const input: PreviewControllerInput = {
+    selectedWorktreeId: 'worktree_shared',
+    sessionId: 'workspace_recent',
+    canOpenPreview: true,
+    organizationId: undefined,
+  };
+
+  function PreviewControllerTest(props: PreviewControllerInput) {
+    const preview = usePreviewController(props);
+    return createElement(
+      'button',
+      { onClick: preview.openDialog, 'data-dialog-open': preview.dialog?.open },
+      'Preview'
+    );
+  }
+
+  function render(props: Partial<PreviewControllerInput> = {}) {
+    act(() => root.render(createElement(PreviewControllerTest, { ...input, ...props })));
+  }
+
+  const dialogOpen = () => dom.container.querySelector('button')?.getAttribute('data-dialog-open');
+
+  beforeAll(async () => {
+    ({ usePreviewController } = await import('./use-preview-controller'));
+  });
+
+  beforeEach(() => {
+    mockPreviewOptions.mockReturnValue('https://preview.example/{port}');
+    dom = installTerminalTestDom();
+    root = createRoot(dom.container);
+    render();
+    act(() => dom.container.querySelector('button')?.click());
+    expect(dialogOpen()).toBe('true');
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    dom.cleanup();
+    mockPreviewOptions.mockReturnValue(null);
+  });
+
+  it('stays closed when preview access returns for the same cached target', () => {
+    render({ canOpenPreview: false });
+    expect(dialogOpen()).toBeNull();
+    render();
+    expect(dialogOpen()).toBe('false');
+    act(() => dom.container.querySelector('button')?.click());
+    expect(dialogOpen()).toBe('true');
+  });
+
+  it.each<Partial<PreviewControllerInput>>([
+    { selectedWorktreeId: 'worktree_other' },
+    { organizationId: 'organization_other' },
+    { selectedWorktreeId: null, sessionId: 'workspace_other' },
+  ])('closes when the preview scope changes: %j', props => {
+    render(props);
+    expect(dialogOpen()).toBe('false');
+  });
+
+  it('stays open across chats within the same worktree', () => {
+    render({ sessionId: 'workspace_sibling' });
+    expect(dialogOpen()).toBe('true');
+  });
+});
 
 describe('cloud agent workspace terminal tabs', () => {
   it('starts on the chat tab without terminals', () => {
