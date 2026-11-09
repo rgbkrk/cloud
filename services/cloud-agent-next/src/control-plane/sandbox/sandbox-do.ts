@@ -33,6 +33,9 @@ import {
   readWorkspaceSnapshotRaw,
   sameWorkspaceSnapshotIdentity,
   workspaceSnapshotIdentity,
+  workspaceSnapshotIdentitySchema,
+  workspaceSnapshotStatus,
+  type WorkspaceSnapshotIdentity,
   workspaceSnapshotsEnabled,
   selectWorkspaceSnapshotResult,
   snapshotRestorePending,
@@ -214,6 +217,10 @@ import {
   workspaceConfigFromSpec,
 } from '../../shared/workspace-config.js';
 import {
+  PreviewServicesScanSchema,
+  type ListPreviewServicesOutput,
+} from '../../shared/preview-services.js';
+import {
   CONTROL_PLANE_ALLOCATION_ID_ENV,
   CONTROL_PLANE_PROTOCOL_VERSION,
   CONTROL_PLANE_REQUEST_TIMEOUT_MS,
@@ -240,6 +247,7 @@ import {
   type ControlPlaneFailureReason,
   type ControlPlaneKiloRequestInput,
   type ControlPlaneOutcome,
+  type ControlPlaneRequestError,
   type ControlPlaneRouteSpec,
   type ControlPlaneRouteUpdate,
   type ControlPlaneRouteView,
@@ -762,6 +770,14 @@ function sandboxPreparationProgress(state: AllocationState): RoutePreparationPro
 /** Upper bound on concurrently outstanding wrapper control requests. */
 const MAX_PENDING_CONTROL_REQUESTS = 64;
 
+/** Wrapper scan bound plus headroom, below the generic control request budget. */
+const PREVIEW_SERVICES_CONTROL_TIMEOUT_MS = 6_000;
+
+const WRAPPER_NOT_CONNECTED = 'Wrapper is not connected';
+const WRAPPER_WRITE_FAILED = 'Wrapper socket write failed';
+const WRAPPER_REQUEST_TIMED_OUT = 'Wrapper request timed out';
+const PRE_SEND_NOT_READY_MESSAGES = new Set([WRAPPER_NOT_CONNECTED, WRAPPER_WRITE_FAILED]);
+
 /**
  * Result of the queued half of a control request: either an early failure, or
  * the wrapper-reply promise the caller awaits outside the queue.
@@ -787,11 +803,12 @@ const CORRELATED_RESULT_FRAME_TYPES = new Set<string>([
   'worktree.result',
   'terminal.result',
   'kilo.result',
+  'preview.result',
 ]);
 
 type CorrelatedResultFrame = Extract<
   ControlPlaneWrapperFrame,
-  { type: 'worktree.result' | 'terminal.result' | 'kilo.result' }
+  { type: 'worktree.result' | 'terminal.result' | 'kilo.result' | 'preview.result' }
 >;
 
 function isCorrelatedResultFrame(frame: unknown): frame is CorrelatedResultFrame {
@@ -1031,17 +1048,33 @@ export class SandboxControlV2 extends DurableObject<Env> {
    * state into the public snapshot; it never probes the provider or the wrapper.
    * No owner means no evidence, so the snapshot is `unknown`.
    */
-  async getStatusSnapshot(): Promise<SandboxStatusSnapshot> {
+  async getStatusSnapshot(
+    identity: WorkspaceSnapshotIdentity | null = null
+  ): Promise<SandboxStatusSnapshot> {
     await this.initialized;
     return this.enqueue(async () => {
       const owner = await this.requireOwner();
       const allocation = owner === null ? null : await this.getAllocationState();
-      return projectAllocationStatusSnapshot({
-        allocation,
-        observedAt: Date.now(),
-        inactivityTimeoutMs: this.sandboxIdleTimeoutMs(allocation),
-        runtimeIdentity: readRuntimeIdentity(this.ctx.storage.kv, allocation?.allocationId ?? null),
-      });
+      const parsedIdentity = workspaceSnapshotIdentitySchema.safeParse(identity);
+      return {
+        ...projectAllocationStatusSnapshot({
+          allocation,
+          observedAt: Date.now(),
+          inactivityTimeoutMs: this.sandboxIdleTimeoutMs(allocation),
+          runtimeIdentity: readRuntimeIdentity(
+            this.ctx.storage.kv,
+            allocation?.allocationId ?? null
+          ),
+        }),
+        ...workspaceSnapshotStatus(
+          this.db,
+          parsedIdentity.success &&
+            parsedIdentity.data.sandboxId === this.sandboxId &&
+            parsedIdentity.data.userId === owner
+            ? parsedIdentity.data
+            : null
+        ),
+      };
     });
   }
 
@@ -1185,6 +1218,7 @@ export class SandboxControlV2 extends DurableObject<Env> {
             return result;
           }),
         eligible: route => this.workspaceSnapshotRouteEligible(route),
+        stored: async () => this.broadcastStatusSnapshots(await this.readAllocation()),
         read: async () => {
           const state = await this.readAllocation();
           const socket = this.boundWrapperSocket(state);
@@ -1400,7 +1434,8 @@ export class SandboxControlV2 extends DurableObject<Env> {
     const handoff = await this.enqueue(async () => {
       await this.initializeOwner(parsed.kiloUserId);
       const routes = await listRoutes(this.db);
-      deleteWorkspaceSnapshot(this.db, parsed.worktreeId, 'workspace_deleted');
+      if (deleteWorkspaceSnapshot(this.db, parsed.worktreeId, 'workspace_deleted'))
+        this.broadcastStatusSnapshots(await this.readAllocation());
       this.fenceWorkspaceSnapshot('workspace_deleted');
       const target = worktreeOwnedRoutes(routes, parsed);
       const state = await this.readAllocation();
@@ -1738,6 +1773,60 @@ export class SandboxControlV2 extends DurableObject<Env> {
   }
 
   /**
+   * Session DO -> Sandbox DO live preview discovery. Workspace scope binding and
+   * allocation state are read passively first, so a stopped sandbox returns
+   * `not_running` and a preparing one `not_ready` without any provider call or
+   * wake. Only a bound wrapper socket is asked to scan; its reply is awaited
+   * outside the queue like every other control request.
+   */
+  async previewServices(scope: PreviewSandboxScope): Promise<ListPreviewServicesOutput> {
+    await this.initialized;
+    const target = await this.previewTarget(scope);
+    if (target.status === 'unsupported_provider') {
+      return { services: [], status: 'unsupported' };
+    }
+    if (target.status === 'not_ready') return { services: [], status: 'not_ready' };
+    if (target.status === 'not_running') return { services: [], status: 'not_running' };
+
+    const handoff = await this.enqueue(() => this.beginPreviewServicesRequest());
+    if ('error' in handoff) {
+      if (handoff.error.ok) throw new Error('Unexpected preview service scan result');
+      return this.previewServicesHandoffFailure(handoff.error.error);
+    }
+    const result = await handoff.promise;
+    if (!result.ok) this.previewServicesFailure(result.error);
+    const parsed = PreviewServicesScanSchema.safeParse(result.result);
+    if (!parsed.success) throw new Error('Invalid preview service scan result');
+    return { services: parsed.data.services, status: 'running' };
+  }
+
+  private async beginPreviewServicesRequest(): Promise<ControlRequestHandoff> {
+    return this.beginWrapperControlRequest(
+      {
+        type: 'preview.list',
+        requestId: crypto.randomUUID(),
+      },
+      Math.min(this.controlRequestTimeoutMs, PREVIEW_SERVICES_CONTROL_TIMEOUT_MS)
+    );
+  }
+
+  private previewServicesHandoffFailure(
+    error: ControlPlaneRequestError
+  ): ListPreviewServicesOutput {
+    if (PRE_SEND_NOT_READY_MESSAGES.has(error.message)) {
+      return { services: [], status: 'not_ready' };
+    }
+    return this.previewServicesFailure(error);
+  }
+
+  private previewServicesFailure(error: ControlPlaneRequestError): never {
+    if (error.message === WRAPPER_REQUEST_TIMED_OUT) {
+      throw new Error('Preview service discovery timed out');
+    }
+    throw new Error(`Preview service scan failed (${error.code})`);
+  }
+
+  /**
    * Binds one request frame to the connected socket under the serial queue and
    * registers it in the pending map. The wrapper's reply is resolved on the raw
    * socket path, so callers await the returned promise OUTSIDE the queue (spec
@@ -1752,7 +1841,7 @@ export class SandboxControlV2 extends DurableObject<Env> {
     const state = await this.readAllocation();
     const socket = this.boundWrapperSocket(state);
     if (socket === null) {
-      return { error: controlRequestFailure('not_ready', 'Wrapper is not connected', true) };
+      return { error: controlRequestFailure('not_ready', WRAPPER_NOT_CONNECTED, true) };
     }
     if (this.pendingControlRequests.size >= MAX_PENDING_CONTROL_REQUESTS) {
       return {
@@ -1763,9 +1852,9 @@ export class SandboxControlV2 extends DurableObject<Env> {
     if (!this.trySendFrame(socket, frame)) {
       this.settlePendingControlRequest(
         frame.requestId,
-        controlRequestFailure('not_ready', 'Wrapper socket write failed', true)
+        controlRequestFailure('not_ready', WRAPPER_WRITE_FAILED, true)
       );
-      return { error: controlRequestFailure('not_ready', 'Wrapper socket write failed', true) };
+      return { error: controlRequestFailure('not_ready', WRAPPER_WRITE_FAILED, true) };
     }
     return { promise };
   }
@@ -1778,7 +1867,7 @@ export class SandboxControlV2 extends DurableObject<Env> {
     return new Promise<ControlPlaneControlResult>(resolve => {
       const timer = setTimeout(() => {
         this.pendingControlRequests.delete(requestId);
-        resolve(controlRequestFailure('not_ready', 'Wrapper request timed out', true));
+        resolve(controlRequestFailure('not_ready', WRAPPER_REQUEST_TIMED_OUT, true));
       }, timeoutMs);
       this.pendingControlRequests.set(requestId, { socket, resolve, timer });
     });
@@ -2261,10 +2350,18 @@ export class SandboxControlV2 extends DurableObject<Env> {
         if (owner === null || owner !== url.searchParams.get('ownerId') || !sessionId)
           return new Response('Sandbox owner mismatch', { status: 403 });
         const allocation = await this.readAllocation();
+        const parsedIdentity = workspaceSnapshotIdentitySchema.safeParse({
+          sandboxId: this.sandboxId,
+          userId: owner,
+          workspaceId: url.searchParams.get('workspaceId'),
+          directory: url.searchParams.get('directory'),
+          orgId: url.searchParams.get('orgId') ?? undefined,
+        });
+        const identity = parsedIdentity.success ? parsedIdentity.data : null;
         const pair = new WebSocketPair();
         this.ctx.acceptWebSocket(pair[1], ['sandbox-status']);
-        pair[1].serializeAttachment({ kind: 'sandbox-status', sessionId });
-        this.sendStatusSnapshot(pair[1], sessionId, allocation);
+        pair[1].serializeAttachment({ kind: 'sandbox-status', sessionId, identity });
+        this.sendStatusSnapshot(pair[1], sessionId, allocation, identity);
         return new Response(null, { status: 101, webSocket: pair[0] });
       });
     }
@@ -5203,7 +5300,8 @@ export class SandboxControlV2 extends DurableObject<Env> {
       log('selected', candidate.sessionId, candidate.owner.workspaceId);
       await notifyPreparingRoutes(this.routeContext(current), {
         step: 'restore',
-        detail: 'Restoring the workspace tail snapshot',
+        detail: 'Using workspace snapshot',
+        snapshotCapturedAt: descriptor.capturedAt,
       });
       return {
         snapshotId: descriptor.snapshotId,
@@ -5322,6 +5420,9 @@ export class SandboxControlV2 extends DurableObject<Env> {
     await notifyPreparingRoutes(this.routeContext(state), {
       step: 'environment_snapshot',
       detail: environmentStartDetail(candidate.reference, lookup),
+      ...(lookup.kind === 'resolved' && lookup.resolution.snapshot !== null
+        ? { snapshotCapturedAt: lookup.resolution.snapshot.capturedAt }
+        : {}),
     });
     return {
       options: decision.snapshot === undefined ? {} : { snapshot: decision.snapshot },
@@ -6444,6 +6545,10 @@ export class SandboxControlV2 extends DurableObject<Env> {
       previous.unconfirmedProviderRef === state.unconfirmedProviderRef
     )
       return;
+    this.broadcastStatusSnapshots(state);
+  }
+
+  private broadcastStatusSnapshots(state: AllocationState): void {
     for (const socket of this.ctx.getWebSockets('sandbox-status')) {
       const attachment: unknown = socket.deserializeAttachment();
       if (
@@ -6451,22 +6556,39 @@ export class SandboxControlV2 extends DurableObject<Env> {
         attachment !== null &&
         'sessionId' in attachment &&
         typeof attachment.sessionId === 'string'
-      )
-        this.sendStatusSnapshot(socket, attachment.sessionId, state);
+      ) {
+        const identity = workspaceSnapshotIdentitySchema.safeParse(
+          'identity' in attachment ? attachment.identity : null
+        );
+        this.sendStatusSnapshot(
+          socket,
+          attachment.sessionId,
+          state,
+          identity.success ? identity.data : null
+        );
+      }
     }
   }
 
-  private sendStatusSnapshot(socket: WebSocket, sessionId: string, state: AllocationState): void {
-    const snapshot = projectAllocationStatusSnapshot({
-      allocation: {
-        ...state,
-        provider: this.currentProvider(),
-        configuration: this.providerPin?.configuration ?? null,
-      },
-      observedAt: Date.now(),
-      inactivityTimeoutMs: this.sandboxIdleTimeoutMs(state),
-      runtimeIdentity: readRuntimeIdentity(this.ctx.storage.kv, state.allocationId),
-    });
+  private sendStatusSnapshot(
+    socket: WebSocket,
+    sessionId: string,
+    state: AllocationState,
+    identity: WorkspaceSnapshotIdentity | null
+  ): void {
+    const snapshot = {
+      ...projectAllocationStatusSnapshot({
+        allocation: {
+          ...state,
+          provider: this.currentProvider(),
+          configuration: this.providerPin?.configuration ?? null,
+        },
+        observedAt: Date.now(),
+        inactivityTimeoutMs: this.sandboxIdleTimeoutMs(state),
+        runtimeIdentity: readRuntimeIdentity(this.ctx.storage.kv, state.allocationId),
+      }),
+      ...workspaceSnapshotStatus(this.db, identity),
+    };
     try {
       socket.send(
         JSON.stringify({

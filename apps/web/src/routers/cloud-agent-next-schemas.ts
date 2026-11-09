@@ -42,6 +42,11 @@ export {
   SandboxStatusSnapshotSchema as baseGetSandboxStatusNextOutputSchema,
   SANDBOX_STATUS_DETAIL_MESSAGES,
 } from '../../../../services/cloud-agent-next/src/shared/sandbox-status';
+export {
+  ListPreviewServicesOutputSchema as baseListPreviewServicesNextOutputSchema,
+  type ListPreviewServicesOutput,
+  type PreviewService,
+} from '../../../../services/cloud-agent-next/src/shared/preview-services';
 export { GetEgressAuditResponseSchema as baseGetEgressAuditNextOutputSchema } from '@kilocode/worker-utils/egress-audit';
 export type {
   SandboxLifecycleStatus,
@@ -813,6 +818,8 @@ export const baseResizeTerminalNextOutputSchema = z.object({
 export const baseCloseTerminalNextOutputSchema = z.object({
   success: z.boolean(),
 });
+
+export const baseListPreviewServicesNextSchema = previewTargetSchema;
 
 const previewRequestSchema = z.object({
   port: z.number().int().min(PREVIEW_PORT_MIN).max(PREVIEW_PORT_MAX),

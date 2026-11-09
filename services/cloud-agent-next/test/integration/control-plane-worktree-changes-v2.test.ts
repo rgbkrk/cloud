@@ -1404,3 +1404,82 @@ describe('control-plane worktree changes (B10)', () => {
     wrapper.close();
   });
 });
+
+describe('SandboxSessionV2 preview service discovery', () => {
+  async function readySession(wrapperId: string) {
+    const sessionId = newSessionId();
+    const sandboxId = await generateSandboxId(sessionId);
+    const provider = createFakeProvider();
+    const worktreeId = `worktree_${crypto.randomUUID()}`;
+    const sessionStub = await startSessionWithSandbox({
+      sessionId,
+      sandboxId,
+      provider,
+      worktreeId,
+    });
+    const wrapper = await connectAndHello(provider, sandboxId, wrapperId);
+    await markRouteReady(sessionStub, wrapper, sessionId);
+    await settleCaptures(wrapper);
+    return {
+      sessionId,
+      sandboxId,
+      sessionStub,
+      wrapper,
+      scope: { ownerId: USER_ID, organizationId: ORG_ID, scopeId: worktreeId },
+    };
+  }
+
+  it('relays a bound wrapper scan to the session caller', async () => {
+    const { sessionStub, wrapper } = await readySession('wr_preview_ok');
+
+    const pending = sessionStub.listPreviewServices();
+    const frame = await awaitFrame(wrapper, 'preview.list');
+    wrapper.send({
+      type: 'preview.result',
+      requestId: frame.requestId,
+      ok: true,
+      result: { services: [{ port: 5173, name: 'Next.js' }] },
+    });
+
+    await expect(pending).resolves.toEqual({
+      services: [{ port: 5173, name: 'Next.js' }],
+      status: 'running',
+    });
+    wrapper.close();
+  });
+
+  it('surfaces a post-send timeout as an error instead of not_ready', async () => {
+    const { sandboxId, wrapper, scope } = await readySession('wr_preview_timeout');
+    const sandboxStub = sandboxes.getByName(sandboxId);
+    await runInDurableObject(sandboxStub, instance => {
+      instance.controlRequestTimeoutMs = 25;
+    });
+
+    const assertion = expect(
+      runInDurableObject(sandboxStub, instance => instance.previewServices(scope))
+    ).rejects.toThrow('Preview service discovery timed out');
+    await awaitFrame(wrapper, 'preview.list');
+
+    await assertion;
+    wrapper.close();
+  });
+
+  it('surfaces a wrapper scan error', async () => {
+    const { sandboxId, wrapper, scope } = await readySession('wr_preview_error');
+    const sandboxStub = sandboxes.getByName(sandboxId);
+
+    const assertion = expect(
+      runInDurableObject(sandboxStub, instance => instance.previewServices(scope))
+    ).rejects.toThrow('Preview service scan failed (scan_failed)');
+    const frame = await awaitFrame(wrapper, 'preview.list');
+    wrapper.send({
+      type: 'preview.result',
+      requestId: frame.requestId,
+      ok: false,
+      error: { code: 'scan_failed', message: 'denied', retryable: true },
+    });
+
+    await assertion;
+    wrapper.close();
+  });
+});

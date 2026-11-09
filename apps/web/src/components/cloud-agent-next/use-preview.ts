@@ -6,6 +6,27 @@ import { toast } from 'sonner';
 import { useTRPC } from '@/lib/trpc/utils';
 import type { PreviewTarget } from '../../../../../services/cloud-agent-next/src/shared/preview-target';
 
+export function usePreviewServices(target: PreviewTarget, organizationId: string | undefined) {
+  const trpc = useTRPC();
+  const options = {
+    staleTime: 0,
+    retry: 1,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  } as const;
+  const personal = useQuery({
+    ...trpc.cloudAgentNext.listPreviewServices.queryOptions(organizationId ? skipToken : target),
+    ...options,
+  });
+  const organization = useQuery({
+    ...trpc.organizations.cloudAgentNext.listPreviewServices.queryOptions(
+      organizationId ? { ...target, organizationId } : skipToken
+    ),
+    ...options,
+  });
+  return organizationId ? organization : personal;
+}
+
 /**
  * The target's preview URL with a `{port}` placeholder, or null when the
  * Worker does not serve preview for it. The answer changes only on a Worker

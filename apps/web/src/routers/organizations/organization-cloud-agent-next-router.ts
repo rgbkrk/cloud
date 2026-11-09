@@ -78,6 +78,8 @@ import {
   baseCreatePreviewNextSchema,
   baseCreatePreviewNextOutputSchema,
   previewTargetFromInput,
+  baseListPreviewServicesNextSchema,
+  baseListPreviewServicesNextOutputSchema,
   cloudAgentGetAttachmentUploadUrlSchema,
   cloudAgentReleasePendingUploadsSchema,
 } from '../cloud-agent-next-schemas';
@@ -250,6 +252,11 @@ const CreateTerminalInput = baseCreateTerminalNextSchema.extend({
 
 const CreatePreviewInput = z.intersection(
   baseCreatePreviewNextSchema,
+  z.object({ organizationId: z.uuid() })
+);
+
+const ListPreviewServicesInput = z.intersection(
+  baseListPreviewServicesNextSchema,
   z.object({ organizationId: z.uuid() })
 );
 
@@ -803,6 +810,45 @@ export const organizationCloudAgentNextRouter = createTRPCRouter({
         ...target,
       });
       return { url: buildPreviewOpenUrl(ticket, input.path), expiresAt };
+    }),
+
+  listPreviewServices: organizationMemberProcedure
+    .input(ListPreviewServicesInput)
+    .output(baseListPreviewServicesNextOutputSchema)
+    .query(async ({ ctx, input }) => {
+      const target = previewTargetFromInput(input);
+      if (target === null)
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Missing preview target' });
+      if (target.worktreeId !== undefined) {
+        const ownsWorktree = await verifyOrgOwnsPreviewWorktree(
+          db,
+          input.organizationId,
+          ctx.user.id,
+          target.worktreeId
+        );
+        if (!ownsWorktree) {
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: 'Worktree not found or access denied',
+          });
+        }
+      } else if (target.cloudAgentSessionId !== undefined) {
+        await assertOrganizationOwnsSession({
+          organizationId: input.organizationId,
+          userId: ctx.user.id,
+          cloudAgentSessionId: target.cloudAgentSessionId,
+        });
+      }
+      const authToken = await createCloudAgentControlToken(
+        ctx.user,
+        ctx.headersList,
+        input.organizationId
+      );
+      return await createCloudAgentNextClient(authToken).listPreviewServices(
+        target.worktreeId !== undefined
+          ? { ...target, organizationId: input.organizationId }
+          : target
+      );
     }),
 
   refreshTerminalTicket: organizationMemberMutationProcedure

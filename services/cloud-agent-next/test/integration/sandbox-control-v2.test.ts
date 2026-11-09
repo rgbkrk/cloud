@@ -3115,4 +3115,24 @@ describe('SandboxControlV2 previewTarget', () => {
     expect(provider.createCalls).toBe(1);
     expect(await readPreviewRoute(stub, PREVIEW_SESSION)).toEqual(seeded);
   });
+
+  it('answers an unrouted preview service inquiry as not_running and never enqueues', async () => {
+    const stub = sandboxNamespace.getByName(`${SANDBOX_ID}__preview_services`);
+    const observed = await runInDurableObject(stub, async (instance, state) => {
+      await state.storage.put('control_plane_owner', PREVIEW_OWNER);
+      const target = instance as unknown as {
+        enqueue: (task: () => Promise<unknown>) => Promise<unknown>;
+      };
+      let enqueueCalls = 0;
+      const original = target.enqueue.bind(instance);
+      target.enqueue = task => {
+        enqueueCalls += 1;
+        return original(task);
+      };
+      const result = await instance.previewServices(previewScope());
+      return { result, enqueueCalls };
+    });
+    expect(observed.result).toEqual({ services: [], status: 'not_running' });
+    expect(observed.enqueueCalls).toBe(0);
+  });
 });
