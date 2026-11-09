@@ -1,7 +1,7 @@
 import { Stack } from 'expo-router';
 import { appScreenLayout } from '@/components/app-screen-layout';
 import { useEffect, useRef } from 'react';
-import { Platform } from 'react-native';
+import { Platform, useWindowDimensions } from 'react-native';
 
 import { UserWebConnectionProvider } from '@/components/agents/user-web-connection-provider';
 import { PickerLaunchRestoreMount } from '@/components/agents/picker-launch-restore-mount';
@@ -22,6 +22,7 @@ import {
   attemptPushRegistrationReconciliation,
   subscribeToPushTokenRotation,
 } from '@/lib/auth/push-registration-reconciliation';
+import { searchPickerHeaderInList } from '@/lib/form-sheet-detents';
 import { useFormSheetScreenOptions } from '@/lib/form-sheet';
 import { useThemeColors } from '@/lib/hooks/use-theme-colors';
 import { getProfileRouteNames } from '@/lib/profile-agent-navigation';
@@ -129,12 +130,30 @@ export const unstable_settings = {
 export default function AppLayout() {
   const colors = useThemeColors();
   const sheetOptions = useFormSheetScreenOptions();
-  // Android's half-height search sheets leave their results behind the IME.
-  // Keep searchable sheets at the existing safe-area-capped full detent.
+  // Android's half-height search sheets leave their results behind the IME, so
+  // they keep the existing safe-area-capped full detent. iOS keeps its native
+  // detent expansion on focus, except in a short window: there the half detent
+  // sizes the sheet to its header (measured: a 213pt sheet in a 501pt window,
+  // first row clipped at the sheet edge), so a searchable picker presents full
+  // height and the shared `searchPickerHeaderInList` rule moves its search
+  // field into the list.
+  const shortWindow = searchPickerHeaderInList({ windowHeight: useWindowDimensions().height });
   const searchSheetOptions =
-    Platform.OS === 'android'
+    Platform.OS === 'android' || shortWindow
       ? { ...sheetOptions, sheetAllowedDetents: [sheetOptions.sheetAllowedDetents[1]] }
       : sheetOptions;
+  // Android lays a formSheet route's content out at the sheet's largest
+  // detent, not at the detent it presents: the run-target list measured 789dp
+  // inside a sheet whose presented body is 384dp, so whatever overflowed the
+  // sheet could be scrolled neither into view nor tapped, and a drag on a row
+  // fired that row instead of scrolling. One detent bounds the content host to
+  // the presented height, so these sheets always present at half height and
+  // their lists scroll inside it; a second detent would leave the overflow of
+  // the smaller one unreachable and the larger one empty once its list is
+  // bounded. Searchable sheets keep the full detent below, because the IME
+  // covers the half one.
+  const pickerSheetOptions =
+    Platform.OS === 'android' ? { ...sheetOptions, sheetAllowedDetents: [0.5] } : sheetOptions;
   useSecurityLifecycleInvalidation();
   useGlanceableOrgFence();
 
@@ -195,17 +214,20 @@ export default function AppLayout() {
               />
               <Stack.Screen name="agent-chat/new" options={{ headerShown: false }} />
               <Stack.Screen name="agent-chat/[session-id]" />
+              <Stack.Screen name="native-remote" />
               <Stack.Screen name="session-changes/[session-id]" options={{ headerShown: false }} />
               <Stack.Screen name="agent-chat/model-picker" options={searchSheetOptions} />
               <Stack.Screen name="agent-chat/repo-picker" options={searchSheetOptions} />
-              <Stack.Screen name="agent-chat/branch-picker" options={sheetOptions} />
+              <Stack.Screen name="agent-chat/branch-picker" options={pickerSheetOptions} />
+              {/* The mode picker has always pinned its one detent on both
+                  platforms; only the other pickers move to it on Android. */}
               <Stack.Screen
                 name="agent-chat/mode-picker"
                 options={{ ...sheetOptions, sheetAllowedDetents: [0.5] }}
               />
-              <Stack.Screen name="agent-chat/instance-picker" options={sheetOptions} />
-              <Stack.Screen name="agent-chat/folder-picker" options={sheetOptions} />
-              <Stack.Screen name="agent-chat/profile-picker" options={sheetOptions} />
+              <Stack.Screen name="agent-chat/instance-picker" options={pickerSheetOptions} />
+              <Stack.Screen name="agent-chat/folder-picker" options={pickerSheetOptions} />
+              <Stack.Screen name="agent-chat/profile-picker" options={pickerSheetOptions} />
               <Stack.Screen name="todos/[list-id]" />
               <Stack.Screen name="todos/item/[item-id]" />
               <Stack.Screen
@@ -217,7 +239,7 @@ export default function AppLayout() {
               <Stack.Screen name="agent-briefing/settings" />
               <Stack.Screen name="share-gate" options={sheetOptions} />
               <Stack.Screen name="language-picker" options={searchSheetOptions} />
-              <Stack.Screen name="transcription-model-picker" options={sheetOptions} />
+              <Stack.Screen name="transcription-model-picker" options={pickerSheetOptions} />
               <Stack.Screen name="voice-language-picker" options={searchSheetOptions} />
               <Stack.Screen
                 name="kilo-pass"

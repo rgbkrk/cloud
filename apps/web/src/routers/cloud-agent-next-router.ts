@@ -45,6 +45,8 @@ import {
   baseGetSessionNextOutputSchema,
   baseGetEgressAuditNextSchema,
   baseGetEgressAuditNextOutputSchema,
+  baseGetSessionMessagesPageNextSchema,
+  baseGetSessionMessagesPageNextOutputSchema,
   baseGetSandboxStatusNextSchema,
   baseGetSandboxStatusNextOutputSchema,
   baseGetPendingInteractionsNextSchema,
@@ -372,21 +374,14 @@ export const cloudAgentNextRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       await assertUserOwnsSession(ctx.user.id, input.cloudAgentSessionId, input.expectedWorktreeId);
       const authToken = await createCloudAgentControlToken(ctx.user, ctx.headersList);
-      // Prompt turns carry their own model; command turns run the session's
-      // stored model, so resolve it to apply the same free/BYOK eligibility
-      // to every follow-up that queues a model-using turn. If the worker
-      // can't return the session model, fall back to the balance-checked
-      // client (the safe default) rather than failing the mutation on a
-      // read-side error.
-      let modelId: string | undefined;
-      if (input.payload.type === 'prompt') {
-        modelId = input.payload.model;
-      } else {
+      let modelId = input.payload.model;
+      if (modelId === undefined) {
         try {
           modelId = (
             await createCloudAgentNextClient(authToken).getSession(input.cloudAgentSessionId)
           ).model;
         } catch {
+          // A failed fallback read must not bypass balance checks.
           modelId = undefined;
         }
       }
@@ -555,7 +550,7 @@ export const cloudAgentNextRouter = createTRPCRouter({
 
   /**
    * Whether the Worker shows preview for this session, and the preview URL with
-   * a `{port}` placeholder. The Worker owns both preview switches. This is only
+   * a `{port}` placeholder. The Worker owns preview availability. This is only
    * a UI gate, so a Worker failure hides preview instead of failing the query.
    */
   getPreviewOptions: baseProcedure
@@ -688,6 +683,40 @@ export const cloudAgentNextRouter = createTRPCRouter({
     }),
 
   /**
+   * The capture time of the session's workspace snapshot, or null when the
+   * workspace has none. A non-null value is what makes "Start fresh" available
+   * on the failure state of a workspace snapshot start.
+   */
+  getWorkspaceSnapshotRecovery: baseProcedure
+    .input(z.object({ sessionId: z.string().min(1) }).strict())
+    .output(
+      z.union([z.object({ capturedAt: z.number().int().nonnegative().nullable() }), z.null()])
+    )
+    .query(async ({ ctx, input }) => {
+      await assertUserOwnsSession(ctx.user.id, input.sessionId);
+      const client = createCloudAgentNextClient(
+        await createCloudAgentControlToken(ctx.user, ctx.headersList)
+      );
+      return await client.getWorkspaceSnapshotRecovery(input.sessionId);
+    }),
+
+  /**
+   * Remove the session's workspace snapshot so its next start uses the
+   * environment snapshot or the base image. Only an explicit user action may
+   * discard the workspace changes made since the snapshot was captured.
+   */
+  removeWorkspaceSnapshot: baseProcedure
+    .input(z.object({ sessionId: z.string().min(1) }).strict())
+    .output(z.object({ success: z.literal(true) }))
+    .mutation(async ({ ctx, input }) => {
+      await assertUserOwnsSession(ctx.user.id, input.sessionId);
+      const client = createCloudAgentNextClient(
+        await createCloudAgentControlToken(ctx.user, ctx.headersList)
+      );
+      return await client.removeWorkspaceSnapshot(input.sessionId);
+    }),
+
+  /**
    * Cancel one queued (not yet accepted) message by id. Never interrupts the
    * active run; a missing id or the accepted current message returns
    * `{ dropped: false }`.
@@ -756,6 +785,15 @@ export const cloudAgentNextRouter = createTRPCRouter({
       return await createCloudAgentNextClient(
         await createCloudAgentControlToken(ctx.user, ctx.headersList)
       ).getEgressAudit(input);
+    }),
+
+  getSessionMessagesPage: baseProcedure
+    .input(baseGetSessionMessagesPageNextSchema)
+    .output(baseGetSessionMessagesPageNextOutputSchema)
+    .query(async ({ ctx, input }) => {
+      await assertUserOwnsSession(ctx.user.id, input.sessionId);
+      const authToken = await createCloudAgentControlToken(ctx.user, ctx.headersList);
+      return createCloudAgentNextClient(authToken).getSessionMessagesPage(input);
     }),
 
   getSandboxStatus: baseProcedure

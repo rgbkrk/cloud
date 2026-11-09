@@ -47,9 +47,9 @@ import { buildControlPlaneSandboxSelection } from '../../session/control-plane-s
 import { createMessageId } from '../../session/message-id.js';
 import { preflightAndQueuePromptMessage } from '../../session/queue-message.js';
 import type { MessageResultRPCResponse } from '../../session/message-result.js';
+import { classifyStoredInitialTurn } from '../../session/initial-turn-outcome.js';
 import {
   assertSessionOperationIdentity,
-  assertRuntimeIsolationAdmission,
   SESSION_CREATE_INTENT_FINGERPRINT_KEY,
 } from '../../session/session-registration.js';
 import type { Env, TRPCContext } from '../../types.js';
@@ -679,8 +679,8 @@ async function createDestinationRuntimeAuthorization(
   }
 }
 
-async function assertNewDestinationRuntimeIsolation(ctx: TRPCContext): Promise<void> {
-  if (await requiresRuntimeAuthorization(ctx)) assertRuntimeIsolationAdmission(ctx.env);
+async function assertNewDestinationRuntimeAdmission(ctx: TRPCContext): Promise<void> {
+  await requiresRuntimeAuthorization(ctx);
 }
 
 /**
@@ -1070,9 +1070,6 @@ async function registerWorktreeSession(
           }
         }
         registrationAttempted = true;
-        if (preissuedRuntimeAuthorization === undefined) {
-          await assertNewDestinationRuntimeIsolation(ctx);
-        }
         const runtimeAuthorization =
           preissuedRuntimeAuthorization ??
           (await createDestinationRuntimeAuthorization(
@@ -1226,7 +1223,7 @@ async function executeWorktreeCreate(
 ): Promise<OperationProgress> {
   const startedAt = Date.now();
   if (preissuedRuntimeAuthorization === undefined) {
-    await assertNewDestinationRuntimeIsolation(ctx);
+    await assertNewDestinationRuntimeAdmission(ctx);
   }
   const progress = operationProgressSchema.parse({
     cloudAgentSessionId: options.requestedCloudAgentSessionId ?? generateSessionId(),
@@ -1350,7 +1347,7 @@ async function reconcileWorktreeCreate(
       preissuedRuntimeAuthorization !== undefined
     );
   } else if (preissuedRuntimeAuthorization === undefined) {
-    await assertNewDestinationRuntimeIsolation(ctx);
+    await assertNewDestinationRuntimeAdmission(ctx);
   }
 
   const ownership = await findOwnershipRow(
@@ -1660,8 +1657,9 @@ async function initialTurnState(
   );
   if (result.type === 'state-invalid') throw creationInProgress();
   if (result.type !== 'found') return 'missing';
-  if (result.result.status === 'failed' || result.result.status === 'interrupted') return 'failed';
-  return 'admitted';
+  return classifyStoredInitialTurn(result.result).type === 'terminal-failure'
+    ? 'failed'
+    : 'admitted';
 }
 
 function rpcErrorCode(error: unknown): string {

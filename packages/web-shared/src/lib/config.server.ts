@@ -64,6 +64,7 @@ export const INCEPTION_API_KEY = getEnvVariable('INCEPTION_API_KEY');
 export const EXA_API_KEY = getEnvVariable('EXA_API_KEY');
 export const INTERNAL_API_SECRET = getEnvVariable('INTERNAL_API_SECRET');
 export const CODE_REVIEW_HEALTH_SECRET = getEnvVariable('CODE_REVIEW_HEALTH_SECRET');
+export const UPTIME_PROBE_SECRET = getEnvVariable('UPTIME_PROBE_SECRET');
 export const CLOUD_AGENT_DISPATCH_HEALTH_SECRET = getEnvVariable(
   'CLOUD_AGENT_DISPATCH_HEALTH_SECRET'
 );
@@ -92,8 +93,6 @@ export function isSharedResourceTokenIssuanceEnabled(): boolean {
 }
 const resourceTokenFamilyFlags = {
   'cloud-agent-next': 'CLOUD_AGENT_RESOURCE_TOKENS_ENABLED',
-  gastown: 'GASTOWN_RESOURCE_TOKENS_ENABLED',
-  wasteland: 'WASTELAND_RESOURCE_TOKENS_ENABLED',
   chat: 'CHAT_RESOURCE_TOKENS_ENABLED',
   'delegated-resource': 'DELEGATED_RESOURCE_TOKENS_ENABLED',
   'workflow-gateway': 'WORKFLOW_GATEWAY_RESOURCE_TOKENS_ENABLED',
@@ -294,20 +293,7 @@ export const BOUNCER_URL =
  */
 export const AGENT_ENV_VARS_PUBLIC_KEY = getEnvVariable('AGENT_ENV_VARS_PUBLIC_KEY') || '';
 
-// Gastown Service
-export const GASTOWN_SERVICE_URL =
-  getEnvVariable('GASTOWN_SERVICE_URL') ||
-  (process.env.NODE_ENV === 'production' ? 'https://gastown.kiloapps.io' : null);
-export const GASTOWN_BILLING_ANNOUNCEMENT_ENABLED =
-  process.env.NODE_ENV === 'development' ||
-  getEnvVariable('GASTOWN_BILLING_ANNOUNCEMENT_ENABLED') === 'true';
-
-// Cloudflare dashboard link construction (admin town inspector)
 export const CLOUDFLARE_ACCOUNT_ID = getEnvVariable('CLOUDFLARE_ACCOUNT_ID');
-export const CLOUDFLARE_TOWN_DO_NAMESPACE_ID = getEnvVariable('CLOUDFLARE_TOWN_DO_NAMESPACE_ID');
-export const CLOUDFLARE_CONTAINER_DO_NAMESPACE_ID = getEnvVariable(
-  'CLOUDFLARE_CONTAINER_DO_NAMESPACE_ID'
-);
 // Cloudflare Containers GraphQL Analytics (admin reconciliation). Point-of-use only; do not throw at module load.
 export const CLOUDFLARE_ANALYTICS_API_TOKEN = getEnvVariable('CLOUDFLARE_ANALYTICS_API_TOKEN');
 
@@ -461,3 +447,16 @@ export const O11Y_KILO_GATEWAY_CLIENT_SECRET = getEnvVariable('O11Y_KILO_GATEWAY
 // PYLON_IDENTITY_SECRET is the shared secret from the Pylon dashboard used to HMAC-sign
 // the user's email so the widget can verify the end user's identity.
 export const PYLON_IDENTITY_SECRET = getEnvVariable('PYLON_IDENTITY_SECRET') || '';
+
+/**
+ * Binary session-bound MFA step-up switch.
+ *
+ * `'true'` enforces step-up on the admin surfaces; anything else, including
+ * unset, leaves the application exactly as it was before step-up. This is an
+ * environment variable rather than a release toggle so security posture does
+ * not depend on PostHog.
+ */
+export function isAdminStepUpEnabled(): boolean {
+  // Exact match: no trimming or casing variants, so a typo stays off.
+  return getEnvVariable('ADMIN_STEP_UP_ENABLED') === 'true';
+}

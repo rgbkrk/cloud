@@ -140,6 +140,8 @@ export type PreparingStep =
   | 'branch'
   | 'devcontainer_setup'
   | 'setup_commands'
+  | 'session_setup_commands'
+  | 'start_commands'
   | 'workspace_restore'
   | 'workspace_backup'
   | 'sandbox_provision'
@@ -255,6 +257,7 @@ export type SessionStatus =
 /** Data included in 'connected' events. */
 export type ConnectedEventData = {
   bootstrapPending?: boolean;
+  ancillaryOmittedItemCount?: number;
   sessionStatus?: SessionStatus;
   cloudStatus?: { type: CloudStatusType; step?: string; message?: string };
   activeMessageId?: string | null;

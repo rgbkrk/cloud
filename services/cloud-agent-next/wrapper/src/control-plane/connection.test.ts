@@ -1,4 +1,7 @@
 import {
+  KILO_CLI_VERSION_HEADER,
+  WRAPPER_VERSION_HEADER,
+  RUNTIME_HARNESS_HEADER,
   WORKTREE_RUNTIME_HEADER,
   WORKTREE_RUNTIME_VERSION,
   WORKSPACE_CONFIGURATION_HEADER,
@@ -199,6 +202,59 @@ it('advertises worktree support without changing the strict legacy hello', () =>
       startCommands: true,
     });
   });
+});
+
+it.each(['kilo', 'kilo2'] as const)(
+  'reports the %s runtime harness as an upgrade header, not a hello field',
+  runtimeHarness => {
+    withControlledConnection(
+      ({ connection }) => {
+        connection.start();
+        const socket = TestSocket.instances[0];
+        expect(socket.options?.headers?.[RUNTIME_HARNESS_HEADER]).toBe(runtimeHarness);
+        socket.onopen?.();
+        expect(socket.frames[0]).not.toHaveProperty('runtimeHarness');
+      },
+      { runtimeHarness }
+    );
+  }
+);
+
+it('omits the runtime harness header when no harness is configured', () => {
+  withControlledConnection(({ connection }) => {
+    connection.start();
+    expect(TestSocket.instances[0].options?.headers).not.toHaveProperty(RUNTIME_HARNESS_HEADER);
+  });
+});
+
+it('reports observed runtime versions on every upgrade without changing hello', () => {
+  withControlledConnection(
+    ({ connection }) => {
+      const socket = TestSocket.instances[0];
+      expect(socket.options?.headers?.[KILO_CLI_VERSION_HEADER]).toBe('7.9.0-canary.123');
+      expect(socket.options?.headers?.[WRAPPER_VERSION_HEADER]).toBe('2.4.0');
+      socket.onopen?.();
+      expect(socket.frames[0]).not.toHaveProperty('runtimeVersions');
+      expect(socket.frames[0]).not.toHaveProperty('kiloCliVersion');
+      expect(socket.frames[0]).not.toHaveProperty('wrapperVersion');
+      connection.recycle();
+      expect(TestSocket.instances[1].options?.headers?.[KILO_CLI_VERSION_HEADER]).toBe(
+        '7.9.0-canary.123'
+      );
+      expect(TestSocket.instances[1].options?.headers?.[WRAPPER_VERSION_HEADER]).toBe('2.4.0');
+    },
+    { runtimeVersions: { kiloCliVersion: '7.9.0-canary.123', wrapperVersion: '2.4.0' } }
+  );
+});
+
+it('still reports the wrapper version when the CLI version probe fails', () => {
+  withControlledConnection(
+    () => {
+      expect(TestSocket.instances[0].options?.headers).not.toHaveProperty(KILO_CLI_VERSION_HEADER);
+      expect(TestSocket.instances[0].options?.headers?.[WRAPPER_VERSION_HEADER]).toBe('2.4.0');
+    },
+    { runtimeVersions: { kiloCliVersion: null, wrapperVersion: '2.4.0' } }
+  );
 });
 
 describe('acknowledged heartbeat', () => {
@@ -869,9 +925,9 @@ async function connect(
 }
 
 describe('control-plane turn cap and accepted backstop', () => {
-  it('derives the 125-minute accepted backstop from the 120-minute cap', () => {
-    expect(CONTROL_PLANE_TIMERS.wrapper.turnHardCapMs).toBe(7_200_000);
-    expect(CONTROL_PLANE_TIMERS.session.acceptedBackstopMs).toBe(7_500_000);
+  it('derives the 12-hour 5-minute accepted backstop from the 12-hour cap', () => {
+    expect(CONTROL_PLANE_TIMERS.wrapper.turnHardCapMs).toBe(43_200_000);
+    expect(CONTROL_PLANE_TIMERS.session.acceptedBackstopMs).toBe(43_500_000);
 
     const margin =
       CONTROL_PLANE_TIMERS.session.acceptedBackstopMs - CONTROL_PLANE_TIMERS.wrapper.turnHardCapMs;
@@ -881,9 +937,9 @@ describe('control-plane turn cap and accepted backstop', () => {
     );
 
     const scaled = resolveControlPlaneTimers({ CONTROL_PLANE_TIMER_DIVISOR: '100' });
-    expect(scaled.wrapper.turnHardCapMs).toBe(72_000);
+    expect(scaled.wrapper.turnHardCapMs).toBe(432_000);
     // The accepted-backstop margin is not scaled, so it does not shrink with the cap.
-    expect(scaled.session.acceptedBackstopMs).toBe(372_000);
+    expect(scaled.session.acceptedBackstopMs).toBe(732_000);
     expect(scaled.session.acceptedBackstopMs).toBe(scaled.wrapper.turnHardCapMs + margin);
     expect(scaled.session.acceptedBackstopMs).toBeGreaterThan(scaled.wrapper.turnHardCapMs);
   });

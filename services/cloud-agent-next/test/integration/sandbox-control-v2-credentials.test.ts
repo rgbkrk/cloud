@@ -334,10 +334,7 @@ async function setup(
   }));
   await runInDurableObject(stub, async instance => {
     await instance.getAllocationState();
-    // This suite asserts contained grants; keep containment on by default so the
-    // local `.dev.vars` value cannot change what each test means.
     installFakeCredentialEnv(instance.env, broker, {
-      CREDENTIAL_CONTAINMENT_ENABLED: 'true',
       WORKER_URL: VERCEL_TARGET,
       KILOCODE_BACKEND_BASE_URL: 'https://api.kilo.ai',
       KILO_OPENROUTER_BASE: 'https://api.kilo.ai',
@@ -474,7 +471,18 @@ async function reconstructPreB(
     });
     for (const [key, value] of retained) await state.storage.put(key, value);
     expect(await state.storage.get('control_plane_generation')).toBe(2);
-    db.insert(allocationTable).values(allocation).run();
+    // Raw SQL: the pre-B allocation table predates `create_attempt`.
+    db.run(
+      sql`INSERT INTO allocation (id, state, allocation_id, connection_id, provider_ref, wrapper_id,
+              last_frame_at, last_activity_at, create_deadline_at, first_connect_deadline_at,
+              stop_attempt, stop_pending, stop_at, unconfirmed_provider_ref, provider_pin)
+          VALUES (${allocation.id}, ${allocation.state}, ${allocation.allocation_id},
+              ${allocation.connection_id}, ${allocation.provider_ref}, ${allocation.wrapper_id},
+              ${allocation.last_frame_at}, ${allocation.last_activity_at},
+              ${allocation.create_deadline_at}, ${allocation.first_connect_deadline_at},
+              ${allocation.stop_attempt}, ${allocation.stop_pending}, ${allocation.stop_at},
+              ${allocation.unconfirmed_provider_ref}, ${allocation.provider_pin})`
+    );
     // Raw SQL: the pre-B routes table predates `repo_key`, which the schema now carries.
     for (const snapshot of snapshots) {
       db.run(
@@ -1565,7 +1573,7 @@ describe('SandboxControlV2 credentials (B3)', () => {
   it('denies a containment-off selection with a legacy user token', async () => {
     const provider = createFakeProvider();
     const broker = createFakeCredentialBroker();
-    const stub = await setup(provider, broker, { CREDENTIAL_CONTAINMENT_ENABLED: 'false' });
+    const stub = await setup(provider, broker);
     const source = credentialsSource(SESSION, {
       kiloToken: NATIVE_KILO_TOKEN,
       repository: { type: 'git', url: 'https://github.com/acme/widgets.git' },
@@ -1593,7 +1601,6 @@ describe('SandboxControlV2 credentials (B3)', () => {
     const provider = createFakeProvider();
     const broker = createFakeCredentialBroker();
     const stub = await setup(provider, broker, {
-      CREDENTIAL_CONTAINMENT_ENABLED: 'false',
       WORKER_URL: 'https://api.kilo.ai',
     });
     await runInDurableObject(stub, instance => {
@@ -1621,7 +1628,7 @@ describe('SandboxControlV2 credentials (B3)', () => {
   it('stays contained when the selection carries containment on', async () => {
     const provider = createFakeProvider();
     const broker = createFakeCredentialBroker();
-    const stub = await setup(provider, broker, { CREDENTIAL_CONTAINMENT_ENABLED: 'true' });
+    const stub = await setup(provider, broker);
     const source = credentialsSource(SESSION, {
       repository: { type: 'git', url: 'https://github.com/acme/widgets.git' },
     });
@@ -1651,7 +1658,7 @@ describe('SandboxControlV2 credentials (B3)', () => {
   it('denies the containment default with a legacy user token instead of issuing direct credentials', async () => {
     const provider = createFakeProvider();
     const broker = createFakeCredentialBroker();
-    const stub = await setup(provider, broker, { CREDENTIAL_CONTAINMENT_ENABLED: 'false' });
+    const stub = await setup(provider, broker);
     const source = credentialsSource(SESSION, {
       kiloToken: NATIVE_KILO_TOKEN,
       repository: { type: 'git', url: 'https://github.com/acme/widgets.git' },
@@ -1758,9 +1765,7 @@ describe('SandboxControlV2 credentials (B3)', () => {
 
   it('fails a persisted legacy containment-off grant with the upgrade stage', async () => {
     const provider = createFakeProvider();
-    const stub = await setup(provider, createFakeCredentialBroker(), {
-      CREDENTIAL_CONTAINMENT_ENABLED: 'false',
-    });
+    const stub = await setup(provider, createFakeCredentialBroker(), {});
     const spec = { ...routeSpec(SESSION), directory: '/workspace/legacy' };
     const legacy = legacyGrant({
       sessionId: SESSION,
@@ -1992,6 +1997,129 @@ describe('SandboxControlV2 credentials (B3)', () => {
     if (credentialsFrame?.type !== 'session.credentials') throw new Error('missing frame');
     expect(credentialsFrame.kilo.token).toBe(refreshed.kilo.alias);
     expect(credentialsFrame.sessionId).toBe(SESSION);
+  });
+
+  it('renews a due grant from the alarm without a message and keeps the sandbox-visible values', async () => {
+    const provider = createFakeProvider();
+    const broker = createFakeCredentialBroker();
+    const stub = await setup(provider, broker);
+    const { wrapper } = await prepareWarmRoute(stub, provider);
+    const before = JSON.parse((await readRouteRow(stub, SESSION))?.grant ?? '{}') as {
+      kilo: { alias: string; runtimeProxy?: unknown };
+    };
+    const issuedBefore = broker.githubIssued();
+    await setGrantExpiry(stub, SESSION, Date.now() + TIMERS.credentialGrantReissueBelowMs / 2);
+
+    // A long execution sends no message, so only the alarm can renew the lease.
+    await runInDurableObject(stub, instance => instance.alarm());
+
+    const frame = await wrapper.next();
+    if (frame?.type !== 'session.credentials') throw new Error('expected session.credentials');
+    const renewed = JSON.parse((await readRouteRow(stub, SESSION))?.grant ?? '{}') as {
+      kilo: { alias: string; runtimeProxy?: unknown };
+      expiresAt: number;
+    };
+    expect(renewed.kilo.alias === before.kilo.alias).toBe(true);
+    expect(
+      JSON.stringify(renewed.kilo.runtimeProxy) === JSON.stringify(before.kilo.runtimeProxy)
+    ).toBe(true);
+    expect(frame.kilo.token === renewed.kilo.alias).toBe(true);
+    expect(renewed.expiresAt - Date.now()).toBeGreaterThan(TIMERS.credentialGrantReissueBelowMs);
+    expect(broker.githubIssued()).toBe(issuedBefore + 1);
+    expect(await wrapper.next(50)).toBeNull();
+    expect(await stub.status({ sessionId: SESSION })).toMatchObject({ view: { state: 'ready' } });
+
+    // The renewed grant is outside the window, so the next alarm does nothing.
+    await runInDurableObject(stub, instance => instance.alarm());
+    expect(broker.githubIssued()).toBe(issuedBefore + 1);
+  });
+
+  it('retries a failed alarm renewal after a pause and fails the route when the grant expires', async () => {
+    const provider = createFakeProvider();
+    const broker = createFakeCredentialBroker();
+    const stub = await setupVercel(provider, broker);
+    const { wrapper } = await prepareWarmRoute(
+      stub,
+      provider,
+      prepareInput(SESSION, vercelSource(SESSION), routeSpec(SESSION))
+    );
+    await setGrantExpiry(stub, SESSION, Date.now() + TIMERS.credentialGrantReissueBelowMs / 2);
+    const framesBefore = wrapper.receivedFrames();
+    let attempts = 0;
+    const update = provider.adapter.applyContainedCredentials!.bind(provider.adapter);
+    provider.adapter.applyContainedCredentials = async (ref, grants) => {
+      attempts += 1;
+      return update(ref, grants);
+    };
+    provider.failPolicy = true;
+
+    // The grant is still valid: no frame, and the route stays ready.
+    await runInDurableObject(stub, instance => instance.alarm());
+    expect(attempts).toBe(1);
+    expect(wrapper.receivedFrames()).toBe(framesBefore);
+    expect(await stub.status({ sessionId: SESSION })).toMatchObject({ view: { state: 'ready' } });
+
+    // Before the retry time, a second alarm does not attempt again.
+    await runInDurableObject(stub, instance => instance.alarm());
+    expect(attempts).toBe(1);
+
+    // At expiry, the pending retry does not delay the attempt, and the route fails.
+    await setGrantExpiry(stub, SESSION, Date.now() - 1);
+    await runInDurableObject(stub, instance => instance.alarm());
+    expect(attempts).toBe(2);
+    expect(await stub.status({ sessionId: SESSION })).toEqual({
+      sessionId: SESSION,
+      view: { state: 'failed', attemptId: expect.any(String), reason: 'workspace_setup_failed' },
+    });
+    expect(await wrapper.next(50)).toBeNull();
+    expect(wrapper.receivedFrames()).toBe(framesBefore);
+  });
+
+  it('attempts a failed shared-scope renewal once for all members', async () => {
+    const provider = createFakeProvider();
+    const broker = createFakeCredentialBroker();
+    const stub = await setupVercel(provider, broker);
+    const input = (sessionId: string) =>
+      prepareInput(
+        sessionId,
+        { ...vercelSource(sessionId), scopeId: 'shared_modern' },
+        {
+          ...routeSpec(sessionId),
+          directory: '/workspace/shared_modern',
+          runtimeIsolation: 'per-session',
+        }
+      );
+    const { wrapper } = await prepareWarmRoute(stub, provider, input(SESSION));
+    await stub.prepare(input(SESSION_NEXT));
+    if ((await wrapper.next())?.type !== 'session.prepare') throw new Error('missing prepare');
+    wrapper.send({ type: 'session.ready', sessionId: SESSION_NEXT });
+    await waitFor(async () => {
+      expect((await stub.status({ sessionId: SESSION_NEXT })).view.state).toBe('ready');
+    });
+    await setGrantExpiry(stub, SESSION, Date.now() + TIMERS.credentialGrantReissueBelowMs / 2);
+    let attempts = 0;
+    const update = provider.adapter.applyContainedCredentials!.bind(provider.adapter);
+    provider.adapter.applyContainedCredentials = async (ref, grants) => {
+      attempts += 1;
+      return update(ref, grants);
+    };
+    provider.failPolicy = true;
+
+    // Both members share one grant, so one failed attempt sets one retry.
+    await runInDurableObject(stub, instance => instance.alarm());
+    expect(attempts).toBe(1);
+    await runInDurableObject(stub, instance => instance.alarm());
+    expect(attempts).toBe(1);
+
+    // At expiry, one more attempt fails both members.
+    await setGrantExpiry(stub, SESSION, Date.now() - 1);
+    await runInDurableObject(stub, instance => instance.alarm());
+    expect(attempts).toBe(2);
+    for (const sessionId of [SESSION, SESSION_NEXT]) {
+      expect(await stub.status({ sessionId })).toMatchObject({
+        view: { state: 'failed', reason: 'workspace_setup_failed' },
+      });
+    }
   });
 
   it('replaces scoped MCP credentials on normal warm credential renewal without persisting them', async () => {
@@ -3194,9 +3322,7 @@ describe('SandboxControlV2 cold grant rejection diagnostics', () => {
       brokerCalls += 1;
       return { success: false, reason: sentinelReason, secret: brokerSecretMarker };
     };
-    const stub = await setup(provider, createFakeCredentialBroker(), {
-      CREDENTIAL_CONTAINMENT_ENABLED: 'false',
-    });
+    const stub = await setup(provider, createFakeCredentialBroker(), {});
     await installGrantBroker(stub, broker.service);
     // A synthetic user secret genuinely carried through the credential source.
     const source = credentialsSource(SESSION, { userId: USER_SECRET });
@@ -3420,9 +3546,7 @@ describe('SandboxControlV2 cold grant rejection diagnostics', () => {
       authCalls.push(params);
       return { success: false, reason: 'unexpected' };
     };
-    const stub = await setup(provider, createFakeCredentialBroker(), {
-      CREDENTIAL_CONTAINMENT_ENABLED: 'false',
-    });
+    const stub = await setup(provider, createFakeCredentialBroker(), {});
     await installGrantBroker(stub, broker.service);
     const explicitToken = 'ghp_explicit_native_token_value';
     const source = credentialsSource(SESSION, {
@@ -4040,7 +4164,6 @@ describe('SandboxControlV2 environment repository credentials', () => {
     const provider = createFakeProvider();
     const broker = createFakeCredentialBroker();
     const stub = await setup(provider, broker, {
-      CREDENTIAL_CONTAINMENT_ENABLED: 'false',
       WORKER_URL: 'https://api.kilo.ai',
     });
     const view = await stub.prepare({

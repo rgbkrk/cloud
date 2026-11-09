@@ -1,3 +1,4 @@
+import type { CloudSessionMessagesWirePage } from '@kilocode/cloud-agent-sdk/schemas';
 import 'server-only';
 import { createTRPCClient, httpLink, TRPCClientError } from '@trpc/client';
 import { TRPCError } from '@trpc/server';
@@ -23,10 +24,18 @@ import { captureException } from '@sentry/nextjs';
 import { INTERNAL_API_SECRET } from '@kilocode/web-shared/lib/config.server';
 import {
   parseCustomerBillingFailure,
+  type CloudSessionMetadata,
   type PreparationAttempt,
   type SessionConfig,
 } from '@kilocode/cloud-agent-sdk';
-import type { CloudAgentWorktreeId } from '@kilocode/session-ingest-contracts';
+import {
+  cloudSessionMessagesPageInputSchema,
+  cloudSessionMessagesPageWireSchema,
+} from '@kilocode/cloud-agent-sdk/schemas';
+import {
+  WORKTREE_MEMBERSHIP_CHANGED,
+  type CloudAgentWorktreeId,
+} from '@kilocode/session-ingest-contracts';
 import {
   getWorktreeChangesOutputSchema,
   getWorktreeFileOutputSchema,
@@ -241,11 +250,13 @@ export type CreateWorktreeChatOutput = {
 export type DeleteWorktreeInput = {
   worktreeId: CloudAgentWorktreeId;
   kilocodeOrganizationId?: string;
+  onlyIfSoleSessionId?: string;
 };
 
 const deleteWorktreeOutputSchema = z.object({
   success: z.literal(true),
   deletedSessionIds: z.array(z.string()),
+  cleanup: z.enum(['complete', 'pending']).default('complete'),
 });
 
 export type DeleteWorktreeOutput = z.infer<typeof deleteWorktreeOutputSchema>;
@@ -343,6 +354,8 @@ export type ListChildSessionsOutput = {
   nextCursor?: string;
 };
 
+export type GetSessionMessagesPageInput = z.input<typeof cloudSessionMessagesPageInputSchema>;
+
 /** Interactions a cloud-agent session currently waits on. */
 export type GetPendingInteractionsOutput = {
   questions: unknown[];
@@ -396,6 +409,7 @@ export type GetSessionOutput = {
   prompt?: string;
   mode?: AgentMode;
   model?: string;
+  variant?: string;
   autoCommit?: boolean;
   upstreamBranch?: string;
   branchName?: string;
@@ -408,6 +422,7 @@ export type GetSessionOutput = {
   // Lifecycle timestamps (critical for idempotency)
   preparedAt?: number;
   initiatedAt?: number;
+  routeReady?: boolean;
 
   // Callback configuration is intentionally NOT exposed: the stored target
   // may carry service-to-service auth headers (e.g. X-Internal-Secret used
@@ -423,7 +438,10 @@ export type GetSessionOutput = {
   // present after at least one event has been persisted. Null when no events
   // exist, and absent when the DO cannot be reached (fails open).
   latestEventId?: number | null;
-};
+} & Pick<
+  CloudSessionMetadata,
+  'title' | 'associatedPr' | 'totalCostMicrodollars' | 'createdOnPlatform' | 'profileId'
+>;
 
 /**
  * Input for updateSession procedure.
@@ -617,12 +635,19 @@ type CloudAgentNextTRPCClient = {
   deleteSession: {
     mutate: (input: { sessionId: string }) => Promise<{ success: boolean; message?: string }>;
   };
+  removeWorkspaceSnapshot: {
+    mutate: (input: { sessionId: string }) => Promise<{ success: true }>;
+  };
+  getWorkspaceSnapshotRecovery: {
+    query: (input: { sessionId: string }) => Promise<{ capturedAt: number | null } | null>;
+  };
   deleteHostedWorkspaceSession: {
-    mutate: (input: {
+    mutate: (input: { workspaceId: string; sessionId: string; operationKey: string }) => Promise<{
+      success: true;
       workspaceId: string;
       sessionId: string;
-      operationKey: string;
-    }) => Promise<{ success: true; workspaceId: string; sessionId: string }>;
+      cleanup: 'complete' | 'pending';
+    }>;
   };
   deleteWorktree: {
     mutate: (input: DeleteWorktreeInput) => Promise<DeleteWorktreeOutput>;
@@ -638,6 +663,9 @@ type CloudAgentNextTRPCClient = {
   };
   getSession: {
     query: (input: GetSessionInput) => Promise<GetSessionOutput>;
+  };
+  getSessionMessagesPage: {
+    query: (input: GetSessionMessagesPageInput) => Promise<unknown>;
   };
   getSandboxStatus: {
     query: (input: GetSessionInput) => Promise<unknown>;
@@ -793,6 +821,14 @@ export class CloudAgentNextClient {
           error.shape?.data?.code === 'NOT_FOUND' ||
           error.data?.code === 'CONFLICT' ||
           error.shape?.data?.code === 'CONFLICT' ||
+          error.data?.code === 'FORBIDDEN' ||
+          error.shape?.data?.code === 'FORBIDDEN' ||
+          error.data?.code === 'UNAUTHORIZED' ||
+          error.shape?.data?.code === 'UNAUTHORIZED' ||
+          error.data?.code === 'PRECONDITION_FAILED' ||
+          error.shape?.data?.code === 'PRECONDITION_FAILED' ||
+          error.data?.code === 'BAD_REQUEST' ||
+          error.shape?.data?.code === 'BAD_REQUEST' ||
           error.data?.httpStatus === 404 ||
           error.shape?.data?.httpStatus === 404)
       ) {
@@ -808,11 +844,51 @@ export class CloudAgentNextClient {
     }
   }
 
+  /**
+   * Remove the session's workspace snapshot so its next start uses the
+   * environment snapshot or the base image. This discards workspace changes
+   * made since the snapshot was captured.
+   */
+  async removeWorkspaceSnapshot(sessionId: string): Promise<{ success: true }> {
+    try {
+      return await this.client.removeWorkspaceSnapshot.mutate({ sessionId });
+    } catch (error) {
+      captureException(error, {
+        tags: { source: 'cloud-agent-next-client', endpoint: 'removeWorkspaceSnapshot' },
+        extra: { sessionId },
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * The capture time of the session's workspace snapshot, or null when the
+   * workspace has none. A non-null value is what makes "Start fresh" available.
+   */
+  async getWorkspaceSnapshotRecovery(
+    sessionId: string
+  ): Promise<{ capturedAt: number | null } | null> {
+    try {
+      return await this.client.getWorkspaceSnapshotRecovery.query({ sessionId });
+    } catch (error) {
+      captureException(error, {
+        tags: { source: 'cloud-agent-next-client', endpoint: 'getWorkspaceSnapshotRecovery' },
+        extra: { sessionId },
+      });
+      throw error;
+    }
+  }
+
   async deleteHostedWorkspaceSession(input: {
     workspaceId: string;
     sessionId: string;
     operationKey: string;
-  }): Promise<{ success: true; workspaceId: string; sessionId: string }> {
+  }): Promise<{
+    success: true;
+    workspaceId: string;
+    sessionId: string;
+    cleanup: 'complete' | 'pending';
+  }> {
     return this.client.deleteHostedWorkspaceSession.mutate(input);
   }
 
@@ -820,6 +896,13 @@ export class CloudAgentNextClient {
     try {
       return deleteWorktreeOutputSchema.parse(await this.client.deleteWorktree.mutate(input));
     } catch (error) {
+      if (
+        error instanceof TRPCClientError &&
+        error.message === WORKTREE_MEMBERSHIP_CHANGED &&
+        (error.data?.code === 'CONFLICT' || error.shape?.data?.code === 'CONFLICT')
+      ) {
+        throw error;
+      }
       captureException(error, {
         tags: { source: 'cloud-agent-next-client', endpoint: 'deleteWorktree' },
         extra: { worktreeId: input.worktreeId },
@@ -923,6 +1006,15 @@ export class CloudAgentNextClient {
       });
       throw error;
     }
+  }
+
+  async getSessionMessagesPage(
+    input: GetSessionMessagesPageInput
+  ): Promise<CloudSessionMessagesWirePage> {
+    const request = cloudSessionMessagesPageInputSchema.parse(input);
+    return cloudSessionMessagesPageWireSchema.parse(
+      await this.client.getSessionMessagesPage.query(request)
+    );
   }
 
   /** The session's preparation attempts, as its stream replays them. */

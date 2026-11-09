@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { isPreviewEnabled, previewHostTemplate, previewTargetId } from '../../preview/host.js';
 import { previewTargetSchema } from '../../shared/preview-target.js';
-import { isPreviewOwner } from '../../session-identity.js';
 import { protectedProcedure } from '../auth.js';
 
 const previewOptionsInputSchema = z
@@ -22,11 +21,10 @@ const previewOptionsInputSchema = z
 
 /**
  * Tells the web app whether to offer preview for a target, and its preview
- * hostname with a `{port}` placeholder. The Worker's suffix turns preview on
- * and `PREVIEW_ENABLED_IDS` limits who sees it; the Worker owns the label
- * format, so the web app needs no preview configuration of its own. The
- * hostname is not a secret: entry needs a ticket. `organizationId` comes from
- * the client unverified; it only decides whether the UI shows preview.
+ * hostname with a `{port}` placeholder. The Worker's suffix turns preview on;
+ * the Worker owns the label format, so the web app needs no preview
+ * configuration of its own. The hostname is not a secret: entry needs a ticket.
+ * `organizationId` is accepted from older clients and ignored.
  */
 export const getPreviewOptions = protectedProcedure
   .input(previewOptionsInputSchema)
@@ -39,9 +37,6 @@ export const getPreviewOptions = protectedProcedure
   .query(({ ctx, input }) => {
     const suffix = ctx.env.PREVIEW_HOST_SUFFIX;
     if (!isPreviewEnabled(suffix)) return { enabled: false as const };
-    if (!isPreviewOwner(ctx.env, { userId: ctx.userId, orgId: input.organizationId })) {
-      return { enabled: false as const };
-    }
     const targetId = previewTargetId(input.target);
     if (targetId === null) return { enabled: false as const };
     const hostTemplate = previewHostTemplate(targetId, suffix);

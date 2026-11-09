@@ -816,6 +816,25 @@ export const ImpactAdvocateRewardRedemptionState = {
 export type ImpactAdvocateRewardRedemptionState =
   (typeof ImpactAdvocateRewardRedemptionState)[keyof typeof ImpactAdvocateRewardRedemptionState];
 
+// --- Claude billing connections ---
+
+/**
+ * - `pending`: the owner's Anthropic user profile exists; no approval completed yet.
+ * - `connected`: Anthropic issued a connection; Claude requests bill the customer.
+ * - `billing_unavailable`: Anthropic answered `user_profile_not_billable`; requests
+ *   fail without an upstream call until an admin reconnects or removes it.
+ * - `removed`: removed in Kilo; the profile is kept so a reconnect reuses it.
+ */
+export const ClaudeBillingConnectionStatus = {
+  Pending: 'pending',
+  Connected: 'connected',
+  BillingUnavailable: 'billing_unavailable',
+  Removed: 'removed',
+} as const;
+
+export type ClaudeBillingConnectionStatus =
+  (typeof ClaudeBillingConnectionStatus)[keyof typeof ClaudeBillingConnectionStatus];
+
 // --- Coding Plan enums ---
 
 export const BYOKManagementSource = {
@@ -917,6 +936,8 @@ export const AdminActionAuditAction = z.enum([
   'email_test.send',
   'admin.platform_access.set',
   'admin.permissions.set',
+  'admin.step_up.verified',
+  'admin.passkey.enrolled',
   'cloud_agent_session.messages.view',
   'cloud_agent_session.api_history.view',
   'webhook_trigger.request_logs.view',
@@ -935,8 +956,16 @@ export const AdminActionAuditAction = z.enum([
   'credit_campaign.create',
   'credit_campaign.update',
   'credit_campaign.set_active',
+  'support_access.request',
+  'support_access.approve',
+  'support_access.deny',
+  'support_access.cancel',
+  'support_access.revoke',
+  'support_access.emergency_issue',
+  'support_access.review',
   'service_fee.rollback_refund',
   'service_fee.rollback_reconcile',
+  'kilo_pass.cancel_refund',
 ]);
 
 export type AdminActionAuditAction = z.infer<typeof AdminActionAuditAction>;
@@ -1125,9 +1154,9 @@ export const ENKRYPT_RULE_FRAMEWORKS = [
 export const ENKRYPT_POLICY_FORMATS = ['policy_text', 'rules'] as const;
 
 /**
- * What a revise-type input detector, or any output detector, does when it fires. Enkrypt answers
- * revise-type detectors with rewritten text instead of a block message, so the organization chooses
- * whether a detection blocks.
+ * What a revise-type input detector, a configurable input detector, or any output detector does
+ * when it fires. The gateway decides from Enkrypt's verdict whether a detection blocks, so the
+ * organization can choose to only log any of them.
  */
 export const ENKRYPT_REVISE_DETECTOR_ACTIONS = ['log', 'block'] as const;
 
@@ -1137,7 +1166,7 @@ export const ENKRYPT_DETECTOR_LIMITS = {
   keywords: 200,
   keywordLength: 100,
   policyTextLength: 10_000,
-  rules: 50,
+  rules: 5,
   ruleIdLength: 64,
   ruleDisplayTextLength: 120,
   ruleTextLength: 1_000,
@@ -1146,9 +1175,23 @@ export const ENKRYPT_DETECTOR_LIMITS = {
 
 const enkryptLimits = ENKRYPT_DETECTOR_LIMITS;
 
+/**
+ * Policies saved before rules were capped at `ENKRYPT_DETECTOR_LIMITS.rules` can hold up to this
+ * many. Saved detectors accept them so the gateway keeps enforcing those policies instead of
+ * rejecting every request; only a save applies the lower cap.
+ */
+const ENKRYPT_SAVED_RULES_LIMIT = 50;
+
 const EnkryptToggleDetectorSchema = z.strictObject({ enabled: z.boolean() });
 
 const EnkryptReviseDetectorActionSchema = z.enum(ENKRYPT_REVISE_DETECTOR_ACTIONS);
+
+/**
+ * Prompt injection and policy violation detections always blocked before admins could choose Log
+ * only, so detectors saved without an action keep blocking.
+ */
+const EnkryptConfigurableInputDetectorActionSchema =
+  EnkryptReviseDetectorActionSchema.default('block');
 
 function enkryptListItemSchema(noun: string, maxLength: number) {
   return z
@@ -1215,7 +1258,7 @@ const enkryptPolicyFields = {
     ),
   rules: z
     .array(EnkryptPolicyRuleSchema)
-    .max(enkryptLimits.rules, `Add up to ${enkryptLimits.rules} rules.`),
+    .max(ENKRYPT_SAVED_RULES_LIMIT, `Add up to ${enkryptLimits.rules} rules.`),
 };
 
 const EnkryptPiiDetectorSchema = z.strictObject({
@@ -1324,11 +1367,18 @@ function refineEnkryptDetectors(
  */
 export const EnkryptInputDetectorsSchema = z
   .strictObject({
-    injection_attack: EnkryptToggleDetectorSchema,
+    injection_attack: z.strictObject({
+      enabled: z.boolean(),
+      action: EnkryptConfigurableInputDetectorActionSchema,
+    }),
     pii: EnkryptPiiDetectorSchema,
     keyword_detector: EnkryptKeywordDetectorSchema,
     topic_detector: z.strictObject({ enabled: z.boolean(), topic: enkryptTopicsSchema }),
-    policy_violation: z.strictObject({ enabled: z.boolean(), ...enkryptPolicyFields }),
+    policy_violation: z.strictObject({
+      enabled: z.boolean(),
+      action: EnkryptConfigurableInputDetectorActionSchema,
+      ...enkryptPolicyFields,
+    }),
     toxicity: EnkryptToggleDetectorSchema,
     nsfw: EnkryptToggleDetectorSchema,
     bias: EnkryptActionDetectorSchema,
@@ -1393,11 +1443,32 @@ export const ENKRYPT_OUTPUT_DETECTOR_IDS = [
   'bias',
 ] as const satisfies readonly (EnkryptOutputDetectorId & EnkryptDetectorId)[];
 
+function refineEnkryptRuleCount(
+  detectors: { policy_violation: { rules: EnkryptPolicyRule[] } },
+  ctx: z.core.$RefinementCtx
+) {
+  if (detectors.policy_violation.rules.length > enkryptLimits.rules) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['policy_violation', 'rules'],
+      message: `Add up to ${enkryptLimits.rules} rules.`,
+    });
+  }
+}
+
+/** Input detectors as an admin saves them, with policies capped at `ENKRYPT_DETECTOR_LIMITS.rules`. */
+export const EnkryptInputDetectorsUpdateSchema =
+  EnkryptInputDetectorsSchema.superRefine(refineEnkryptRuleCount);
+
+/** Output detectors as an admin saves them, with policies capped at `ENKRYPT_DETECTOR_LIMITS.rules`. */
+export const EnkryptOutputDetectorsUpdateSchema =
+  EnkryptOutputDetectorsSchema.superRefine(refineEnkryptRuleCount);
+
 /**
- * Blocking Enkrypt AI input scan of each gateway chat request. Flagged requests are always
+ * Enkrypt AI input scan of each gateway chat request. Requests flagged by a blocking detector are
  * blocked, and so is every request while Enkrypt is unavailable. Without `detectors` the gateway applies Kilo
- * Default. `scan_tool_results` defaults to true so organizations enabled before it existed keep
- * scanning tool results.
+ * Default. The gateway checks every input, including tool results; `scan_tool_results` is no
+ * longer read and is always written as true.
  *
  * `detectors` is validated with `EnkryptInputDetectorsSchema` where it is written and read, not
  * here: organization settings are parsed on every settings write and on some reads, and a stored
@@ -1812,6 +1883,7 @@ export type AuthProviderId =
   | 'linkedin'
   | 'discord'
   | 'openai'
+  | 'claude'
   | 'fake-login'
   | 'workos';
 

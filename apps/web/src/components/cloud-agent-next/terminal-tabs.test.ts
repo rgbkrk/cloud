@@ -85,10 +85,18 @@ const mockManager = {
 };
 const mockQueryClient = { invalidateQueries: jest.fn(), query: jest.fn() };
 const mockUploadEndpoint = { mutationOptions: () => ({}) };
+const mockWorkspaceSnapshotRecovery = {
+  queryOptions: (input: unknown) => ({ queryKey: [['getWorkspaceSnapshotRecovery'], input] }),
+  pathFilter: () => ({ queryKey: [['getWorkspaceSnapshotRecovery']] }),
+};
+const mockCloudAgentNext = {
+  getAttachmentUploadUrl: mockUploadEndpoint,
+  getWorkspaceSnapshotRecovery: mockWorkspaceSnapshotRecovery,
+};
 const mockGetWithRuntimeState = { queryOptions: (input: unknown) => input };
 const mockTrpc = {
-  cloudAgentNext: { getAttachmentUploadUrl: mockUploadEndpoint },
-  organizations: { cloudAgentNext: { getAttachmentUploadUrl: mockUploadEndpoint } },
+  cloudAgentNext: mockCloudAgentNext,
+  organizations: { cloudAgentNext: mockCloudAgentNext },
   cliSessionsV2: {
     getWithRuntimeState: mockGetWithRuntimeState,
     worktreeParent: { queryOptions: mockParentQueryOptions },
@@ -115,6 +123,9 @@ jest.mock('@tanstack/react-query', () => ({
   queryOptions: (options: unknown) => options,
   useMutation: () => ({ mutateAsync: jest.fn() }),
   useQuery: (options: { queryKey: unknown[] }) => {
+    if ((options.queryKey[0] as unknown[] | undefined)?.[0] === 'getWorkspaceSnapshotRecovery') {
+      return { data: undefined };
+    }
     mockParentQuery(options);
     return { data: options.queryKey[1] === mockSkipToken ? undefined : mockParentSession };
   },
@@ -1454,6 +1465,81 @@ describe('CloudChatPage terminal ownership across navigation', () => {
     render();
 
     expect(chatUiWrites()).toEqual([]);
+  });
+
+  it('carries the selected model and variant when a slash command is sent', async () => {
+    mockAtomValues.sessionConfig = {
+      sessionId: 'workspace_recent',
+      repository: 'owner/repo',
+      mode: 'plan',
+      model: 'selected/model',
+      variant: 'high',
+      runtimeAgents: [],
+    };
+    mockManager.send.mockClear();
+    render();
+
+    await act(async () => {
+      await (
+        mockChatInput?.onSendCommand as
+          | ((command: string, args: string) => Promise<unknown>)
+          | undefined
+      )?.('review', 'main');
+    });
+
+    expect(mockManager.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: {
+          type: 'command',
+          command: 'review',
+          arguments: 'main',
+          mode: 'plan',
+          model: 'selected/model',
+          variant: 'high',
+        },
+      })
+    );
+  });
+
+  it('carries a pinned runtime-agent model and variant when a slash command is sent', async () => {
+    mockAtomValues.sessionConfig = {
+      sessionId: 'workspace_recent',
+      repository: 'owner/repo',
+      mode: 'reviewer',
+      model: 'session/model',
+      variant: 'session-variant',
+      runtimeAgents: [
+        {
+          slug: 'reviewer',
+          name: 'Reviewer',
+          model: 'pinned/model',
+          variant: 'pinned-variant',
+        },
+      ],
+    };
+    mockManager.send.mockClear();
+    render();
+
+    await act(async () => {
+      await (
+        mockChatInput?.onSendCommand as
+          | ((command: string, args: string) => Promise<unknown>)
+          | undefined
+      )?.('review', 'main');
+    });
+
+    expect(mockManager.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: {
+          type: 'command',
+          command: 'review',
+          arguments: 'main',
+          mode: 'reviewer',
+          model: 'pinned/model',
+          variant: 'pinned-variant',
+        },
+      })
+    );
   });
 });
 
