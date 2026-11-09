@@ -40,7 +40,7 @@ import {
 } from '@/lib/providers/openrouter/free-endpoint-data-policy';
 import { injectVercelModels } from '@/lib/providers/openrouter/inject-vercel-models';
 import {
-  getVercelCatalog,
+  vercelCatalogSource,
   type VercelCatalog,
 } from '@kilocode/web-shared/lib/ai-gateway/providers/vercel/vercel-catalog';
 import { withWorstProviderDataPolicy } from '@kilocode/web-shared/lib/ai-gateway/providers/openrouter/model-data-policy';
@@ -467,7 +467,7 @@ export async function syncAndStoreProviders() {
 
   const [openRouterCatalog, vercelCatalog] = await Promise.all([
     getMetadata(openRouterModelsMetadataSource, readDb),
-    getVercelCatalog(),
+    getMetadata(vercelCatalogSource, readDb),
   ]);
 
   const generatedVercelModelIdOverrides = await generateVercelModelIdOverrides(
