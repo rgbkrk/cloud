@@ -22,6 +22,8 @@ import {
   type StreamConnection,
 } from './client.js';
 import {
+  captureControlPlaneWrapperProcess,
+  containerProcessEnvironment,
   findControlPlaneKiloRuntime,
   signalKiloServerProcess,
   killSandboxFamily,
@@ -45,6 +47,7 @@ assert(
   'This driver requires a local database'
 );
 const vars = loadDevVars(serviceRoot);
+const organizationId = z.uuid().parse(process.env.E2E_ORG_ID);
 const user = await loadExistingUserByEmail(
   database.toString(),
   process.env.E2E_USER_EMAIL ?? 'evgeny@kilocode.ai'
@@ -53,7 +56,8 @@ const config: DriverConfig = {
   ...DEFAULT_CONFIG,
   user,
   nextAuthSecret: vars.NEXTAUTH_SECRET,
-  bearerToken: mintApiToken(user, vars.NEXTAUTH_SECRET, 60 * 60),
+  bearerToken: mintApiToken(user, vars.NEXTAUTH_SECRET, 60 * 60, organizationId),
+  kilocodeOrganizationId: organizationId,
   internalApiSecret: vars.INTERNAL_API_SECRET,
   expectControlPlane: true,
   workerUrl: `http://localhost:${port('cloud-agent-next')}`,
@@ -145,11 +149,21 @@ try {
   assert(native, 'No owned Kilo v2 runtime found');
   const docker = async (...args: string[]) =>
     (await execute('docker', args, { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 })).stdout.trim();
+  const executeDocker = async (args: string[]) => ({ stdout: await docker(...args) });
+  // `buildWorktreeKiloEnvironment` strips KILO_RUNTIME_HARNESS from the Kilo
+  // process, so only the wrapper's inherited environment carries it.
+  const wrapper = await captureControlPlaneWrapperProcess(native.container.id, executeDocker);
   assert.equal(
-    await docker('exec', native.container.id, 'printenv', 'KILO_RUNTIME_HARNESS'),
+    (await containerProcessEnvironment(native.container.id, wrapper.processId, executeDocker))
+      .KILO_RUNTIME_HARNESS,
     'kilo2'
   );
-  const version = await docker('exec', native.container.id, 'kilo2', '--version');
+  const version = await docker(
+    'exec',
+    native.container.id,
+    '/opt/kilo-cloud/active/cli/package/bin/kilo2',
+    '--version'
+  );
   const hash = (
     await docker(
       'exec',
