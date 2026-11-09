@@ -66,6 +66,7 @@ describe('CloudAgentSettingsButton deep links', () => {
     ['?settings=', 'general'],
     ['?settings=general', 'general'],
     ['?settings=environments', 'environments'],
+    ['?settings=preferences', 'preferences'],
   ] as const)('opens %s on the %s section', (search, section) => {
     setSearchParams(search);
 
