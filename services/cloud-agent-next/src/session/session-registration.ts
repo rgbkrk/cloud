@@ -1465,6 +1465,7 @@ function buildSessionRegistrationCommand(
           requestedEnvironmentRepositories: input.requestedEnvironment?.repositories ?? [],
         }
       : {}),
+    environmentSetup: input.environmentSetup,
     finalization: input.finalization,
     callback: input.options?.callbackTarget ? { target: input.options.callbackTarget } : undefined,
     workspace: {

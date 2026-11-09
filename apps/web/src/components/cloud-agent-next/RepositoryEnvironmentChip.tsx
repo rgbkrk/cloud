@@ -163,7 +163,7 @@ export function RepositoryEnvironmentChip({
           type="button"
           className={cn(chipClassName, interactiveClassName)}
           aria-label="Set up environment"
-          title="Save setup commands, variables, secrets, a sandbox size, and network access for this repository."
+          title="Save setup commands, variables, secrets, a sandbox size for this repository."
           onClick={() => setDialogOpen(true)}
         >
           {label}

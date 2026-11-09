@@ -25,6 +25,10 @@ import {
   type EnvironmentRepository,
   type EnvironmentSummary,
 } from '@/hooks/useCloudAgentEnvironments';
+import {
+  isOpenEnvironmentSetupRun,
+  useEnvironmentSetupRunsForEnvironment,
+} from '@/hooks/useEnvironmentSetupRuns';
 import { EnvironmentDetailPane, type EnvironmentEditorPage } from '../EnvironmentDialog';
 import { snapshotBadge } from '../environment-build-display';
 
@@ -32,12 +36,14 @@ type EnvironmentsSectionProps = {
   organizationId?: string;
   canManage: boolean;
   active?: boolean;
+  onSetupStarted?: () => void;
 };
 
 export function EnvironmentsSection({
   organizationId,
   canManage,
   active = true,
+  onSetupStarted,
 }: EnvironmentsSectionProps) {
   const query = useCloudAgentEnvironmentsForOwner({ organizationId, enabled: active });
   const repoChoices = useEnvironmentRepositoryChoices(organizationId);
@@ -234,6 +240,7 @@ export function EnvironmentsSection({
             active={active}
             initialPage={editorPage}
             onPageChange={setEditorPage}
+            onSetupStarted={onSetupStarted}
             onSavingChange={setSaving}
             onSaved={handleCreated}
             onDeleted={() => undefined}
@@ -260,6 +267,7 @@ export function EnvironmentsSection({
             active={active}
             initialPage={editorPage}
             onPageChange={setEditorPage}
+            onSetupStarted={onSetupStarted}
             onSavingChange={setSaving}
             onSaved={handleSaved}
             onDeleted={handleDeleted}
@@ -273,7 +281,7 @@ export function EnvironmentsSection({
             </p>
             <p className="text-muted-foreground max-w-sm text-xs">
               {environments.length === 0
-                ? 'Add one to give a repository setup commands, variables, secrets, a sandbox size, and network access.'
+                ? 'Add one to give a repository setup commands, variables, secrets, a sandbox size.'
                 : 'Choose an environment from the list to view or edit it.'}
             </p>
           </div>
@@ -300,6 +308,11 @@ function EnvironmentRow({
   disabled: boolean;
   onSelect: () => void;
 }) {
+  const setupRuns = useEnvironmentSetupRunsForEnvironment(environment.id, {
+    organizationId,
+    enabled: active,
+  });
+  const setupInProgress = setupRuns.data?.some(run => isOpenEnvironmentSetupRun(run.status));
   const { data: buildStatus } = useEnvironmentBuildStatus(environment.id, {
     organizationId,
     enabled: active,
@@ -331,6 +344,11 @@ function EnvironmentRow({
           {members.length > 1 && (
             <Badge variant="outline" className="shrink-0 text-[10px]">
               {members.length} repos
+            </Badge>
+          )}
+          {setupInProgress && (
+            <Badge variant="outline" className="shrink-0 text-[10px]">
+              Setup in progress
             </Badge>
           )}
           {badge && (
